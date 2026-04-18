@@ -129,10 +129,3 @@ services:
 volumes:
   mlflow-db-volume:
   minio-data:
-
-networks:
-  airflow:
-    external: true
-    name: sales-forecasting_0655c3
-  default:
-    name: sales-forecasting_0655c3_default

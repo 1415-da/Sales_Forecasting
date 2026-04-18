@@ -14,7 +14,7 @@ from data_validation.validators import DataValidator
 
 
 default_args = {
-    "owner": "data-team",
+    "owner": "Sales Forecasting Team",
     "depends_on_past": False,
     "start_date": datetime(2025, 7, 22),
     "email_on_failure": True,
