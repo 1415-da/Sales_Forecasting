@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
-from airflow.operators.bash import BashOperator
+from airflow.providers.standard.operators.bash import BashOperator
 import pandas as pd
 import os
 import sys
@@ -10,7 +10,6 @@ sys.path.append("/usr/local/airflow/include")
 
 from include.ml_models.train_models import ModelTrainer
 from include.utils.mlflow_utils import MLflowManager
-from include.data_validation.validators import DataValidator
 
 
 default_args = {
@@ -38,7 +37,9 @@ def sales_forecast_training():
     def extract_data_task():
         from include.utils.data_generator import RealisticSalesDataGenerator
 
-        data_output_dir = "/tmp/sales_data"
+        # Use a stable path inside the Airflow container. `/tmp` can be cleaned up
+        # or differ across task processes/executors, which can lead to partial/corrupt reads.
+        data_output_dir = "/usr/local/airflow/data/sales_data"
         generator = RealisticSalesDataGenerator(
             start_date="2021-01-01", end_date="2021-12-31"
         )
@@ -57,13 +58,28 @@ def sales_forecast_training():
     @task()
     def validate_data_task(extract_result):
         import glob
+        import os
 
         file_paths = extract_result["file_paths"]
         total_rows = 0
         issues_found = []
         print(f"Validating {len(file_paths['sales'])} sales files...")
         for i, sales_file in enumerate(file_paths["sales"][:10]):
-            df = pd.read_parquet(sales_file)
+            # Defensive: skip missing/empty/corrupt parquet files instead of crashing the DAG.
+            if not isinstance(sales_file, str):
+                issues_found.append(f"Unexpected sales file type {type(sales_file)}: {sales_file!r}")
+                continue
+            if not os.path.exists(sales_file):
+                issues_found.append(f"Missing file: {sales_file}")
+                continue
+            if os.path.getsize(sales_file) == 0:
+                issues_found.append(f"Zero-byte file: {sales_file}")
+                continue
+            try:
+                df = pd.read_parquet(sales_file)
+            except Exception as e:
+                issues_found.append(f"Failed to read parquet {sales_file}: {e}")
+                continue
             if i == 0:
                 print(f"Sales data columns: {df.columns.tolist()}")
             if df.empty:
@@ -87,7 +103,11 @@ def sales_forecast_training():
         for data_type in ["promotions", "store_events", "customer_traffic"]:
             if data_type in file_paths and file_paths[data_type]:
                 sample_file = file_paths[data_type][0]
-                df = pd.read_parquet(sample_file)
+                try:
+                    df = pd.read_parquet(sample_file)
+                except Exception as e:
+                    issues_found.append(f"Failed to read {data_type} parquet {sample_file}: {e}")
+                    continue
                 print(f"{data_type} data shape: {df.shape}")
                 print(f"{data_type} columns: {df.columns.tolist()}")
         validation_summary = {
@@ -299,7 +319,7 @@ def sales_forecast_training():
     report = generate_performance_report_task(training_result, validation_summary)
     cleanup = BashOperator(
         task_id="cleanup",
-        bash_command="rm -rf /tmp/sales_data /tmp/performance_report.json || true",
+        bash_command="rm -rf /usr/local/airflow/data/sales_data /tmp/performance_report.json || true",
     )
     report >> cleanup
 
