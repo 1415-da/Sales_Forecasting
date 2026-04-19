@@ -19,7 +19,6 @@ import mlflow
 from utils.mlflow_utils import MLflowManager
 from feature_engineering.feature_pipeline import FeatureEngineer
 from data_validation.validators import DataValidator
-from ml_models.advanced_ensemble import AdvancedEnsemble
 from ml_models.diagnostics import diagnose_model_performance
 from ml_models.ensemble_model import EnsembleModel
 

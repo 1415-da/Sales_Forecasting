@@ -111,7 +111,7 @@ class AdvancedEnsemble:
         
         # Optimize weights
         bounds = [(0, 1) for _ in range(n_models)]
-        result = optimize.minimize(objective, initial_weights, bounds=bounds)
+        result = minimize(objective, initial_weights, bounds=bounds)
         
         # Normalize weights
         optimal_weights = result.x / result.x.sum()

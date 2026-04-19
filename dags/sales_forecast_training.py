@@ -8,9 +8,9 @@ import sys
 # Add include path
 sys.path.append("/usr/local/airflow/include")
 
-from ml_models.train_models import ModelTrainer
-from utils.mlflow_utils import MLflowManager
-from data_validation.validators import DataValidator
+from include.ml_models.train_models import ModelTrainer
+from include.utils.mlflow_utils import MLflowManager
+from include.data_validation.validators import DataValidator
 
 
 default_args = {
