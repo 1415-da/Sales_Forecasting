@@ -42,7 +42,7 @@ A production-ready MLOps platform for sales forecasting that demonstrates modern
 ```bash
 # Clone the repository
 git clone https://github.com/1415-da/Sales_Forecasting
-cd Astro-SalesForecast
+cd Sales_Forecasting
 ```
 
 ### 2. Start All Services
