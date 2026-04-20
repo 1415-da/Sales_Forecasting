@@ -109,6 +109,7 @@ if st.session_state.models_loaded:
     
     with tab1:
         st.markdown("### Upload Historical Sales Data")
+        st.caption("Recommended scale for this demo: sales values in hundreds (for example, 120 to 900).")
         uploaded_file = st.file_uploader(
             "Choose a CSV file",
             type=['csv'],
@@ -128,10 +129,23 @@ if st.session_state.models_loaded:
             missing_cols = [col for col in required_cols if col not in uploaded_df.columns]
             if missing_cols:
                 st.error(f"Missing required columns: {missing_cols}")
-            elif st.button("Use Uploaded Data", key="uploaded_btn"):
-                st.session_state.input_data = uploaded_df
-                st.session_state.input_source = "Uploaded CSV"
-                st.success("✅ Uploaded data selected for prediction")
+            elif pd.to_numeric(uploaded_df['sales'], errors='coerce').isna().any():
+                st.error("Sales column contains non-numeric values. Please clean the file and re-upload.")
+            else:
+                uploaded_df['sales'] = pd.to_numeric(uploaded_df['sales'], errors='coerce')
+                median_sales = float(uploaded_df['sales'].median())
+                if median_sales > 1000:
+                    st.warning(
+                        "Uploaded sales appear to be in thousands scale. "
+                        "For this frontend demo, convert to hundreds for more explainable outputs."
+                    )
+                    if st.button("Convert Uploaded Sales to Hundreds (/10)", key="uploaded_scale_hundreds_btn"):
+                        uploaded_df['sales'] = uploaded_df['sales'] / 10.0
+                        st.success("✅ Converted uploaded sales to hundreds scale")
+                if st.button("Use Uploaded Data", key="uploaded_btn"):
+                    st.session_state.input_data = uploaded_df
+                    st.session_state.input_source = "Uploaded CSV"
+                    st.success("✅ Uploaded data selected for prediction")
     
     with tab2:
         st.markdown("### Enter Recent Sales Data")
@@ -154,7 +168,7 @@ if st.session_state.models_loaded:
                 sales = st.number_input(
                     "Sales ($)",
                     min_value=0,
-                    value=5000 + i*100,
+                    value=420 + i * 15,
                     key=f"manual_{i}",
                     label_visibility="collapsed"
                 )
@@ -177,7 +191,7 @@ if st.session_state.models_loaded:
         with col1:
             sample_days = st.number_input("Historical Days", value=60, min_value=7)
         with col2:
-            avg_sales = st.number_input("Average Daily Sales", value=5000, min_value=100)
+            avg_sales = st.number_input("Average Daily Sales", value=520, min_value=50)
         with col3:
             volatility = st.slider("Volatility (%)", 0, 50, 20)
         
@@ -236,19 +250,30 @@ if st.session_state.models_loaded:
                     
                 if results['success']:
                     st.success("✅ Forecast generated successfully!")
+
+                    # Keep chart/metric labels aligned with input data scale.
+                    sales_series = pd.to_numeric(input_data["sales"], errors="coerce")
+                    median_input_sales = float(sales_series.median()) if not sales_series.empty else 0.0
+                    in_hundreds_scale = median_input_sales < 1000
+                    unit_suffix = " (hundreds scale)" if in_hundreds_scale else " ($)"
+                    unit_axis = "Sales (hundreds scale)" if in_hundreds_scale else "Sales ($)"
+                    if in_hundreds_scale:
+                        st.info(
+                            "Input appears to be in hundreds scale. Forecast metrics/charts below use the same scale."
+                        )
                         
                     # Show metrics
                     st.markdown("### 📈 Forecast Summary")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric(
-                            "Total Forecast",
-                            f"${results['summary']['total_predicted_sales']:,.0f}"
+                            f"Total Forecast{unit_suffix}",
+                            f"{results['summary']['total_predicted_sales']:,.0f}"
                         )
                     with col2:
                         st.metric(
-                            "Daily Average",
-                            f"${results['summary']['average_daily_sales']:,.0f}"
+                            f"Daily Average{unit_suffix}",
+                            f"{results['summary']['average_daily_sales']:,.0f}"
                         )
                     with col3:
                         st.metric(
@@ -276,11 +301,14 @@ if st.session_state.models_loaded:
                     forecast_only = predictions_df.copy()
                         
                     fig = go.Figure()
+                    # Show only recent history so forecast and confidence band remain readable.
+                    history_window_days = min(30, len(historical_df))
+                    historical_display_df = historical_df.tail(history_window_days).copy()
 
                     # Historical data
                     fig.add_trace(go.Scatter(
-                        x=historical_df['date'],
-                        y=historical_df['sales'],
+                        x=historical_display_df['date'],
+                        y=historical_display_df['sales'],
                         mode='lines',
                         name='Historical',
                         line=dict(color='blue', width=2)
@@ -301,7 +329,7 @@ if st.session_state.models_loaded:
                         y=forecast_only['upper_bound'],
                         fill=None,
                         mode='lines',
-                        line_color='rgba(0,255,0,0)',
+                        line=dict(color='rgba(34,139,34,0.35)', width=1, dash='dot'),
                         showlegend=False
                     ))
 
@@ -310,17 +338,31 @@ if st.session_state.models_loaded:
                         y=forecast_only['lower_bound'],
                         fill='tonexty',
                         mode='lines',
-                        line_color='rgba(0,255,0,0.2)',
+                        line=dict(color='rgba(34,139,34,0.35)', width=1, dash='dot'),
+                        fillcolor='rgba(34,139,34,0.22)',
                         name='95% Confidence'
                     ))
+
+                    # Dynamic y-range using visible history + forecast bounds
+                    y_values = np.concatenate(
+                        [
+                            historical_display_df['sales'].astype(float).values,
+                            forecast_only['lower_bound'].astype(float).values,
+                            forecast_only['upper_bound'].astype(float).values,
+                        ]
+                    )
+                    y_min = float(np.min(y_values))
+                    y_max = float(np.max(y_values))
+                    y_pad = max((y_max - y_min) * 0.08, 1.0)
 
                     fig.update_layout(
                         title="Sales Forecast with Confidence Intervals",
                         xaxis_title="Date",
-                        yaxis_title="Sales ($)",
+                        yaxis_title=unit_axis,
                         hovermode='x unified',
                         height=500,
-                        showlegend=True
+                        showlegend=True,
+                        yaxis=dict(range=[y_min - y_pad, y_max + y_pad]),
                     )
                         
                     st.plotly_chart(fig, use_container_width=True)
@@ -349,7 +391,7 @@ if st.session_state.models_loaded:
                     cumulative_fig.update_layout(
                         title="Running Total Predicted Sales",
                         xaxis_title="Date",
-                        yaxis_title="Cumulative Sales ($)",
+                        yaxis_title=f"Cumulative {unit_axis}",
                         hovermode="x unified",
                         height=380,
                     )

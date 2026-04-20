@@ -162,8 +162,6 @@ class SimplePredictor:
                     row[f'sales_rolling_{window}_max'] = _rolling(sales_history, window, np.max)
                     row[f'sales_rolling_{window}_median'] = _rolling(sales_history, window, np.median)
 
-                row['store_id'] = _encode_store_id(store_value)
-
                 if self.model_loader.feature_cols:
                     feature_cols = self.model_loader.feature_cols
                 else:
@@ -172,6 +170,17 @@ class SimplePredictor:
                         'is_weekend', 'sales_lag_1', 'sales_lag_7',
                         'sales_rolling_7_mean', 'sales_rolling_7_std'
                     ]
+
+                # Handle store_id features robustly:
+                # - if one-hot encoded store_id_* columns are expected, set the matching column to 1
+                # - otherwise use numeric/label-encoded store_id
+                has_store_one_hot = any(col.startswith('store_id_') for col in feature_cols)
+                if has_store_one_hot:
+                    for col in feature_cols:
+                        if col.startswith('store_id_'):
+                            row[col] = 1.0 if col == f"store_id_{store_value}" else 0.0
+                if 'store_id' in feature_cols and not has_store_one_hot:
+                    row['store_id'] = _encode_store_id(store_value)
 
                 for col in feature_cols:
                     if col not in row:
@@ -202,12 +211,21 @@ class SimplePredictor:
                 except:
                     logger.warning("Could not inverse transform predictions")
             
+            # Build an uncertainty band from recent volatility to avoid invisible/flat intervals.
+            recent_hist = np.array(sales_history[-30:], dtype=float)
+            hist_mean = float(np.mean(recent_hist)) if recent_hist.size else 1.0
+            hist_std = float(np.std(recent_hist)) if recent_hist.size else 0.0
+            base_uncertainty = hist_std / max(abs(hist_mean), 1.0)
+            base_uncertainty = float(np.clip(base_uncertainty, 0.10, 0.35))
+            horizon_scale = 1.0 + (np.arange(len(predictions)) / max(len(predictions), 1)) * 0.25
+            interval_ratio = base_uncertainty * horizon_scale
+
             # Create results dataframe
             results_df = pd.DataFrame({
                 'date': future_dates,
                 'predicted_sales': predictions,
-                'lower_bound': predictions * 0.9,  # Simple 10% confidence interval
-                'upper_bound': predictions * 1.1
+                'lower_bound': predictions * (1.0 - interval_ratio),
+                'upper_bound': predictions * (1.0 + interval_ratio),
             })
             
             # Calculate summary statistics
