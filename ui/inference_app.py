@@ -45,6 +45,8 @@ if 'model_loader' not in st.session_state:
     st.session_state.run_id = None
 if 'input_data' not in st.session_state:
     st.session_state.input_data = None
+if 'input_source' not in st.session_state:
+    st.session_state.input_source = None
 
 # Header
 st.title("🔮 Sales Forecast Inference")
@@ -102,6 +104,8 @@ if st.session_state.models_loaded:
     tab1, tab2, tab3 = st.tabs(["📤 Upload Data", "✏️ Manual Entry", "🎲 Sample Data"])
     
     input_data = st.session_state.input_data
+    if st.session_state.input_source:
+        st.caption(f"Active input source: {st.session_state.input_source}")
     
     with tab1:
         st.markdown("### Upload Historical Sales Data")
@@ -112,21 +116,22 @@ if st.session_state.models_loaded:
         )
         
         if uploaded_file is not None:
-            input_data = pd.read_csv(uploaded_file)
-            st.session_state.input_data = input_data
-            st.success(f"✅ Loaded {len(input_data)} records")
+            uploaded_df = pd.read_csv(uploaded_file)
+            st.success(f"✅ Loaded {len(uploaded_df)} records")
             
             # Show preview
             with st.expander("Data Preview"):
-                st.dataframe(input_data.head())
+                st.dataframe(uploaded_df.head())
                 
             # Basic validation
             required_cols = ['date', 'sales']
-            missing_cols = [col for col in required_cols if col not in input_data.columns]
+            missing_cols = [col for col in required_cols if col not in uploaded_df.columns]
             if missing_cols:
                 st.error(f"Missing required columns: {missing_cols}")
-                input_data = None
-                st.session_state.input_data = None
+            elif st.button("Use Uploaded Data", key="uploaded_btn"):
+                st.session_state.input_data = uploaded_df
+                st.session_state.input_source = "Uploaded CSV"
+                st.success("✅ Uploaded data selected for prediction")
     
     with tab2:
         st.markdown("### Enter Recent Sales Data")
@@ -162,6 +167,7 @@ if st.session_state.models_loaded:
         if st.button("Use Manual Data", key="manual_btn"):
             input_data = pd.DataFrame(manual_data)
             st.session_state.input_data = input_data
+            st.session_state.input_source = "Manual Entry"
             st.success("✅ Manual data ready for prediction")
     
     with tab3:
@@ -193,6 +199,7 @@ if st.session_state.models_loaded:
                 'sales': sales
             })
             st.session_state.input_data = input_data
+            st.session_state.input_source = "Sample Data"
             
             st.success("✅ Sample data generated")
             
@@ -256,16 +263,24 @@ if st.session_state.models_loaded:
                         
                     # Visualization
                     st.markdown("### 📊 Forecast Visualization")
+                    st.info(
+                        "This chart compares historical sales (blue) with forecasted sales (green). "
+                        "The shaded band shows the 95% confidence range (lower to upper bound), "
+                        "which indicates possible variation around the main forecast."
+                    )
                         
-                    predictions_df = results['predictions']
-                    historical_mask = predictions_df.index < len(input_data)
+                    predictions_df = results['predictions'].copy()
+                    predictions_df["date"] = pd.to_datetime(predictions_df["date"])
+                    historical_df = input_data.copy()
+                    historical_df["date"] = pd.to_datetime(historical_df["date"])
+                    forecast_only = predictions_df.copy()
                         
                     fig = go.Figure()
 
                     # Historical data
                     fig.add_trace(go.Scatter(
-                        x=predictions_df[historical_mask]['date'],
-                        y=input_data['sales'],
+                        x=historical_df['date'],
+                        y=historical_df['sales'],
                         mode='lines',
                         name='Historical',
                         line=dict(color='blue', width=2)
@@ -273,8 +288,8 @@ if st.session_state.models_loaded:
 
                     # Forecast
                     fig.add_trace(go.Scatter(
-                        x=predictions_df[~historical_mask]['date'],
-                        y=predictions_df[~historical_mask]['predicted_sales'],
+                        x=forecast_only['date'],
+                        y=forecast_only['predicted_sales'],
                         mode='lines',
                         name='Forecast',
                         line=dict(color='green', width=3)
@@ -282,8 +297,8 @@ if st.session_state.models_loaded:
 
                     # Confidence interval
                     fig.add_trace(go.Scatter(
-                        x=predictions_df[~historical_mask]['date'],
-                        y=predictions_df[~historical_mask]['upper_bound'],
+                        x=forecast_only['date'],
+                        y=forecast_only['upper_bound'],
                         fill=None,
                         mode='lines',
                         line_color='rgba(0,255,0,0)',
@@ -291,8 +306,8 @@ if st.session_state.models_loaded:
                     ))
 
                     fig.add_trace(go.Scatter(
-                        x=predictions_df[~historical_mask]['date'],
-                        y=predictions_df[~historical_mask]['lower_bound'],
+                        x=forecast_only['date'],
+                        y=forecast_only['lower_bound'],
                         fill='tonexty',
                         mode='lines',
                         line_color='rgba(0,255,0,0.2)',
@@ -309,13 +324,118 @@ if st.session_state.models_loaded:
                     )
                         
                     st.plotly_chart(fig, use_container_width=True)
+
+                    # Additional forecasting explainability charts
+                    forecast_only["cumulative_forecast"] = forecast_only["predicted_sales"].cumsum()
+                    forecast_only["interval_width"] = (
+                        forecast_only["upper_bound"] - forecast_only["lower_bound"]
+                    )
+
+                    st.markdown("### 📈 Cumulative Forecast")
+                    st.caption(
+                        "Running total of predicted sales across the forecast period. "
+                        "Use this to compare expected revenue against targets."
+                    )
+                    cumulative_fig = go.Figure()
+                    cumulative_fig.add_trace(
+                        go.Scatter(
+                            x=forecast_only["date"],
+                            y=forecast_only["cumulative_forecast"],
+                            mode="lines",
+                            name="Cumulative Forecast",
+                            line=dict(color="#1f77b4", width=3),
+                        )
+                    )
+                    cumulative_fig.update_layout(
+                        title="Running Total Predicted Sales",
+                        xaxis_title="Date",
+                        yaxis_title="Cumulative Sales ($)",
+                        hovermode="x unified",
+                        height=380,
+                    )
+                    st.plotly_chart(cumulative_fig, use_container_width=True)
+
+                    st.markdown("### 📏 Prediction Interval Width")
+                    st.caption(
+                        "Shows forecast uncertainty over time as (upper bound - lower bound). "
+                        "Higher values mean lower confidence for that date."
+                    )
+                    width_fig = go.Figure()
+                    width_fig.add_trace(
+                        go.Scatter(
+                            x=forecast_only["date"],
+                            y=forecast_only["interval_width"],
+                            mode="lines+markers",
+                            name="Uncertainty Width",
+                            line=dict(color="#ff7f0e", width=2),
+                        )
+                    )
+                    width_fig.update_layout(
+                        title="Uncertainty Band Width Over Time",
+                        xaxis_title="Date",
+                        yaxis_title="Upper - Lower Bound ($)",
+                        hovermode="x unified",
+                        height=350,
+                    )
+                    st.plotly_chart(width_fig, use_container_width=True)
+
+                    st.markdown("### 🗓️ Forecast Intensity Calendar Heatmap")
+                    st.caption(
+                        "Highlights busy vs slow forecast days. Darker cells indicate higher predicted sales, "
+                        "helping with staffing, inventory, and campaign planning."
+                    )
+                    day_order = [
+                        "Monday",
+                        "Tuesday",
+                        "Wednesday",
+                        "Thursday",
+                        "Friday",
+                        "Saturday",
+                        "Sunday",
+                    ]
+                    heatmap_df = forecast_only.copy()
+                    heatmap_df["day_name"] = heatmap_df["date"].dt.day_name()
+                    heatmap_df["day_name"] = pd.Categorical(
+                        heatmap_df["day_name"], categories=day_order, ordered=True
+                    )
+                    heatmap_df["week_start"] = heatmap_df["date"] - pd.to_timedelta(
+                        heatmap_df["date"].dt.weekday, unit="D"
+                    )
+                    heatmap_matrix = (
+                        heatmap_df.pivot_table(
+                            index="day_name",
+                            columns="week_start",
+                            values="predicted_sales",
+                            aggfunc="mean",
+                        )
+                        .reindex(day_order)
+                        .sort_index(axis=1)
+                    )
+
+                    heatmap_fig = go.Figure(
+                        data=go.Heatmap(
+                            z=heatmap_matrix.values,
+                            x=[d.strftime("%Y-%m-%d") for d in heatmap_matrix.columns],
+                            y=heatmap_matrix.index.tolist(),
+                            colorscale="Blues",
+                            colorbar=dict(title="Predicted<br>Sales ($)"),
+                            hoverongaps=False,
+                        )
+                    )
+                    heatmap_fig.update_layout(
+                        title="Daily Forecast Intensity (Busy vs Slow Days)",
+                        xaxis_title="Week Start",
+                        yaxis_title="Day of Week",
+                        height=420,
+                    )
+                    st.plotly_chart(heatmap_fig, use_container_width=True)
                         
                     st.markdown("### 💾 Export Results")
 
                     col1, col2 = st.columns(2)
                     with col1:
                         # Prepare download data
-                        export_df = predictions_df[~historical_mask].copy()
+                        export_df = forecast_only.copy()
                         export_df = export_df.round(2)
 
                         csv = export_df.to_csv(index=False)

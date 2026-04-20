@@ -89,6 +89,8 @@ class SimplePredictor:
             
             # Prepare historical data
             historical_df = self.prepare_features(input_data)
+            historical_df['date'] = pd.to_datetime(historical_df['date'])
+            historical_df = historical_df.sort_values('date').reset_index(drop=True)
             
             # Create future dates
             last_date = pd.to_datetime(input_data['date']).max()
@@ -98,105 +100,98 @@ class SimplePredictor:
                 freq='D'
             )
             
-            # Create future dataframe
-            future_df = pd.DataFrame({
-                'date': future_dates,
-                'store_id': input_data['store_id'].iloc[-1] if 'store_id' in input_data.columns else 'store_001'
-            })
-            
-            # Prepare features for future dates
-            future_df = self.prepare_features(future_df)
-            
-            # Use last known values for lag features
-            if len(historical_df) > 0 and 'sales' in historical_df.columns:
-                # Get recent sales values for lag features
-                recent_sales = historical_df['sales'].tail(30).values
-                sales_mean = historical_df['sales'].mean()
-                
-                # Set lag features based on historical data
-                for lag in [1, 2, 3, 7, 14, 21, 30]:
-                    if len(recent_sales) >= lag:
-                        future_df[f'sales_lag_{lag}'] = recent_sales[-lag]
-                    else:
-                        future_df[f'sales_lag_{lag}'] = sales_mean
-                
-                # Set rolling statistics based on historical data
-                for window in [3, 7, 14, 21, 30]:
-                    if len(recent_sales) >= window:
-                        window_data = recent_sales[-window:]
-                        future_df[f'sales_rolling_{window}_mean'] = np.mean(window_data)
-                        future_df[f'sales_rolling_{window}_std'] = np.std(window_data)
-                        future_df[f'sales_rolling_{window}_min'] = np.min(window_data)
-                        future_df[f'sales_rolling_{window}_max'] = np.max(window_data)
-                        future_df[f'sales_rolling_{window}_median'] = np.median(window_data)
-                    else:
-                        future_df[f'sales_rolling_{window}_mean'] = sales_mean
-                        future_df[f'sales_rolling_{window}_std'] = 0
-                        future_df[f'sales_rolling_{window}_min'] = sales_mean
-                        future_df[f'sales_rolling_{window}_max'] = sales_mean
-                        future_df[f'sales_rolling_{window}_median'] = sales_mean
-            
-            # Handle categorical features (store_id)
-            if 'store_id' in future_df.columns and future_df['store_id'].dtype == 'object':
-                # If we have encoders, use them
+            # Build robust defaults from historical data for features the model expects.
+            numeric_defaults: Dict[str, float] = {}
+            if not historical_df.empty:
+                numeric_cols = historical_df.select_dtypes(include=[np.number]).columns
+                for col in numeric_cols:
+                    if col != 'sales':
+                        numeric_defaults[col] = float(historical_df[col].mean())
+
+            store_value = (
+                input_data['store_id'].iloc[-1]
+                if 'store_id' in input_data.columns and len(input_data) > 0
+                else 'store_001'
+            )
+
+            sales_history = historical_df['sales'].dropna().astype(float).tolist()
+            if not sales_history:
+                return {'success': False, 'error': 'Input data must include non-empty sales history'}
+
+            def _encode_store_id(value):
                 if self.model_loader.encoders and 'store_id' in self.model_loader.encoders:
                     try:
-                        # Transform store_id
                         encoder = self.model_loader.encoders['store_id']
-                        # Handle unknown categories
-                        known_stores = list(encoder.classes_)
-                        future_df['store_id'] = future_df['store_id'].apply(
-                            lambda x: x if x in known_stores else known_stores[0]
-                        )
-                        encoded_stores = encoder.transform(future_df['store_id'])
-                        future_df['store_id'] = encoded_stores
+                        known = list(encoder.classes_)
+                        safe_value = value if value in known else known[0]
+                        return int(encoder.transform([safe_value])[0])
                     except Exception as e:
                         logger.warning(f"Error encoding store_id: {e}")
-                        # Default to numeric encoding
-                        future_df['store_id'] = 1
-                else:
-                    # No encoder, convert to numeric
-                    # Extract numeric part if format is "store_XXX"
-                    if future_df['store_id'].str.contains('store_').any():
-                        future_df['store_id'] = future_df['store_id'].str.extract('(\d+)').astype(int)
-                    else:
-                        future_df['store_id'] = 1
-            
-            # Select features based on what the model expects
-            if self.model_loader.feature_cols:
-                # Use only features that exist in both the data and expected features
-                available_features = [col for col in self.model_loader.feature_cols 
-                                    if col in future_df.columns]
-                if len(available_features) < len(self.model_loader.feature_cols):
-                    # Add missing features with default values
-                    for col in self.model_loader.feature_cols:
-                        if col not in future_df.columns:
-                            # Special handling for categorical encoded features
-                            if col.startswith('store_'):
-                                future_df[col] = 0
-                            else:
-                                future_df[col] = 0
-                X = future_df[self.model_loader.feature_cols].values
-            else:
-                # Fallback to basic features (exclude string columns)
-                feature_cols = ['year', 'month', 'day', 'dayofweek', 'quarter', 
-                               'is_weekend', 'sales_lag_1', 'sales_lag_7',
-                               'sales_rolling_mean_7', 'sales_rolling_std_7']
-                # Add any store_id encoded columns
-                store_cols = [col for col in future_df.columns if col.startswith('store_id_') and col != 'store_id']
-                feature_cols.extend(store_cols)
-                available_features = [col for col in feature_cols if col in future_df.columns]
-                X = future_df[available_features].values
-            
-            # Scale features if scaler is available
-            if self.model_loader.scalers and 'features' in self.model_loader.scalers:
+                if isinstance(value, str) and 'store_' in value:
+                    digits = ''.join(ch for ch in value if ch.isdigit())
+                    return int(digits) if digits else 1
                 try:
-                    X = self.model_loader.scalers['features'].transform(X)
-                except:
-                    logger.warning("Could not apply feature scaling")
-            
-            # Make predictions
-            predictions = self.model_loader.predict(X, model_type=model_type)
+                    return int(value)
+                except Exception:
+                    return 1
+
+            def _rolling(values, window, fn):
+                if len(values) >= window:
+                    arr = np.array(values[-window:], dtype=float)
+                else:
+                    arr = np.array(values, dtype=float)
+                if arr.size == 0:
+                    return 0.0
+                return float(fn(arr))
+
+            predictions_list = []
+            for forecast_date in future_dates:
+                row = {'date': forecast_date, 'store_id': store_value}
+                row = self.prepare_features(pd.DataFrame([row])).iloc[0].to_dict()
+
+                # Dynamic lag and rolling features based on latest observed/predicted values.
+                for lag in [1, 2, 3, 7, 14, 21, 30]:
+                    row[f'sales_lag_{lag}'] = (
+                        sales_history[-lag] if len(sales_history) >= lag else float(np.mean(sales_history))
+                    )
+
+                for window in [3, 7, 14, 21, 30]:
+                    row[f'sales_rolling_{window}_mean'] = _rolling(sales_history, window, np.mean)
+                    row[f'sales_rolling_{window}_std'] = _rolling(sales_history, window, np.std)
+                    row[f'sales_rolling_{window}_min'] = _rolling(sales_history, window, np.min)
+                    row[f'sales_rolling_{window}_max'] = _rolling(sales_history, window, np.max)
+                    row[f'sales_rolling_{window}_median'] = _rolling(sales_history, window, np.median)
+
+                row['store_id'] = _encode_store_id(store_value)
+
+                if self.model_loader.feature_cols:
+                    feature_cols = self.model_loader.feature_cols
+                else:
+                    feature_cols = [
+                        'year', 'month', 'day', 'dayofweek', 'quarter',
+                        'is_weekend', 'sales_lag_1', 'sales_lag_7',
+                        'sales_rolling_7_mean', 'sales_rolling_7_std'
+                    ]
+
+                for col in feature_cols:
+                    if col not in row:
+                        row[col] = numeric_defaults.get(col, 0.0)
+
+                X = np.array([[row[col] for col in feature_cols]], dtype=float)
+
+                # Scale features if scaler is available
+                if self.model_loader.scalers and 'features' in self.model_loader.scalers:
+                    try:
+                        X = self.model_loader.scalers['features'].transform(X)
+                    except Exception as e:
+                        logger.warning(f"Could not apply feature scaling: {e}")
+
+                pred = self.model_loader.predict(X, model_type=model_type)
+                pred_value = float(np.array(pred).flatten()[0])
+                predictions_list.append(pred_value)
+                sales_history.append(pred_value)
+
+            predictions = np.array(predictions_list, dtype=float)
             
             # Scale predictions back if scaler is available
             if self.model_loader.scalers and 'target' in self.model_loader.scalers:

@@ -52,6 +52,12 @@ class SimpleModelLoader:
                     with open(scalers_path, 'rb') as f:
                         self.scalers = pickle.load(f)
                     logger.info("Loaded scalers with pickle")
+
+            # Normalize scaler keys to what inference expects.
+            # Training stores the feature scaler as "standard".
+            if isinstance(self.scalers, dict):
+                if 'features' not in self.scalers and 'standard' in self.scalers:
+                    self.scalers['features'] = self.scalers['standard']
             
             # Load encoders
             encoders_path = os.path.join(artifacts_path, "encoders.pkl")
