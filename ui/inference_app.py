@@ -155,6 +155,12 @@ if st.session_state.models_loaded:
             store_id = st.text_input("Store ID", value="store_001")
         with col2:
             st.info("Enter sales for the last 7 days")
+
+        include_all_manual_features = st.checkbox(
+            "Include all training features (quantity_sold, profit, has_promotion, customer_traffic, is_holiday)",
+            value=True,
+            key="manual_include_all_features",
+        )
         
         # Create input grid
         st.markdown("#### Daily Sales Input")
@@ -177,6 +183,33 @@ if st.session_state.models_loaded:
                     'store_id': store_id,
                     'sales': sales
                 })
+
+        if include_all_manual_features:
+            st.markdown("#### Additional Feature Controls")
+            f1, f2, f3, f4 = st.columns(4)
+            with f1:
+                quantity_multiplier = st.number_input(
+                    "Quantity multiplier", min_value=0.05, max_value=2.0, value=0.21, step=0.01
+                )
+            with f2:
+                profit_margin = st.number_input(
+                    "Profit margin", min_value=0.01, max_value=0.90, value=0.30, step=0.01
+                )
+            with f3:
+                traffic_multiplier = st.number_input(
+                    "Traffic multiplier", min_value=0.10, max_value=5.0, value=0.95, step=0.05
+                )
+            with f4:
+                promo_frequency = st.number_input(
+                    "Promotion every N days", min_value=2, max_value=14, value=3, step=1
+                )
+
+            for idx, row in enumerate(manual_data):
+                row["quantity_sold"] = int(max(1, round(row["sales"] * quantity_multiplier)))
+                row["profit"] = round(row["sales"] * profit_margin, 2)
+                row["customer_traffic"] = int(max(50, round(row["sales"] * traffic_multiplier)))
+                row["has_promotion"] = 1 if idx % promo_frequency == 0 else 0
+                row["is_holiday"] = 1 if row["date"].weekday() >= 5 else 0
         
         if st.button("Use Manual Data", key="manual_btn"):
             input_data = pd.DataFrame(manual_data)
@@ -194,6 +227,29 @@ if st.session_state.models_loaded:
             avg_sales = st.number_input("Average Daily Sales", value=520, min_value=50)
         with col3:
             volatility = st.slider("Volatility (%)", 0, 50, 20)
+
+        include_all_sample_features = st.checkbox(
+            "Include all training features in generated sample data",
+            value=True,
+            key="sample_include_all_features",
+        )
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            sample_quantity_multiplier = st.number_input(
+                "Sample quantity multiplier", min_value=0.05, max_value=2.0, value=0.21, step=0.01
+            )
+        with s2:
+            sample_profit_margin = st.number_input(
+                "Sample profit margin", min_value=0.01, max_value=0.90, value=0.30, step=0.01
+            )
+        with s3:
+            sample_traffic_multiplier = st.number_input(
+                "Sample traffic multiplier", min_value=0.10, max_value=5.0, value=0.95, step=0.05
+            )
+        with s4:
+            sample_promo_every = st.number_input(
+                "Sample promotion every N days", min_value=2, max_value=14, value=3, step=1
+            )
         
         if st.button("Generate Sample Data", key="sample_btn"):
             # Generate realistic sample data
@@ -212,6 +268,18 @@ if st.session_state.models_loaded:
                 'store_id': 'store_001',
                 'sales': sales
             })
+            if include_all_sample_features:
+                input_data['quantity_sold'] = np.maximum(
+                    (sales * sample_quantity_multiplier).round().astype(int), 1
+                )
+                input_data['profit'] = np.round(sales * sample_profit_margin, 2)
+                input_data['has_promotion'] = (
+                    (dates.dayofweek.isin([4, 5])) & (np.arange(sample_days) % sample_promo_every == 0)
+                ).astype(int)
+                input_data['customer_traffic'] = np.maximum(
+                    (sales * sample_traffic_multiplier).round().astype(int), 50
+                )
+                input_data['is_holiday'] = dates.dayofweek.isin([5, 6]).astype(int)
             st.session_state.input_data = input_data
             st.session_state.input_source = "Sample Data"
             
@@ -238,6 +306,12 @@ if st.session_state.models_loaded:
     if input_data is not None:
         st.markdown("---")
         st.header("📊 Generate Forecast")
+        st.caption(
+            f"Current active dataset: {len(input_data)} rows, {len(input_data.columns)} columns"
+        )
+        with st.expander("🧾 Current active columns", expanded=False):
+            st.write(", ".join([str(col) for col in input_data.columns.tolist()]))
+            st.dataframe(input_data.head(5), use_container_width=True)
 
         if st.button("🚀 Run Prediction", type="primary", use_container_width=True, key="run_prediction"):
             with st.spinner("Generating forecast..."):
@@ -251,16 +325,8 @@ if st.session_state.models_loaded:
                 if results['success']:
                     st.success("✅ Forecast generated successfully!")
 
-                    # Keep chart/metric labels aligned with input data scale.
-                    sales_series = pd.to_numeric(input_data["sales"], errors="coerce")
-                    median_input_sales = float(sales_series.median()) if not sales_series.empty else 0.0
-                    in_hundreds_scale = median_input_sales < 1000
-                    unit_suffix = " (hundreds scale)" if in_hundreds_scale else " ($)"
-                    unit_axis = "Sales (hundreds scale)" if in_hundreds_scale else "Sales ($)"
-                    if in_hundreds_scale:
-                        st.info(
-                            "Input appears to be in hundreds scale. Forecast metrics/charts below use the same scale."
-                        )
+                    unit_suffix = " ($)"
+                    unit_axis = "Sales ($)"
                         
                     # Show metrics
                     st.markdown("### 📈 Forecast Summary")
@@ -378,14 +444,21 @@ if st.session_state.models_loaded:
                         "Running total of predicted sales across the forecast period. "
                         "Use this to compare expected revenue against targets."
                     )
+
+                    cumulative_y = forecast_only["cumulative_forecast"].astype(float).values
+                    cum_min = float(np.min(cumulative_y))
+                    cum_max = float(np.max(cumulative_y))
+                    cum_pad = max((cum_max - cum_min) * 0.12, 1.0)
+
                     cumulative_fig = go.Figure()
                     cumulative_fig.add_trace(
                         go.Scatter(
                             x=forecast_only["date"],
                             y=forecast_only["cumulative_forecast"],
-                            mode="lines",
+                            mode="lines+markers",
                             name="Cumulative Forecast",
                             line=dict(color="#1f77b4", width=3),
+                            marker=dict(size=5),
                         )
                     )
                     cumulative_fig.update_layout(
@@ -394,6 +467,7 @@ if st.session_state.models_loaded:
                         yaxis_title=f"Cumulative {unit_axis}",
                         hovermode="x unified",
                         height=380,
+                        yaxis=dict(range=[cum_min - cum_pad, cum_max + cum_pad]),
                     )
                     st.plotly_chart(cumulative_fig, use_container_width=True)
 

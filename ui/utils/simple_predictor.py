@@ -210,6 +210,24 @@ class SimplePredictor:
                     ).flatten()
                 except:
                     logger.warning("Could not inverse transform predictions")
+
+            # Final inference-time calibration:
+            # align forecast level to recent observed history to reduce systematic scale drift.
+            try:
+                recent_actual = np.array(sales_history[-(forecast_days + 7):-forecast_days], dtype=float)
+                if recent_actual.size == 0:
+                    recent_actual = np.array(sales_history[-7:], dtype=float)
+                baseline_pred = predictions[: min(7, len(predictions))]
+                if recent_actual.size > 0 and baseline_pred.size > 0:
+                    actual_mean = float(np.mean(recent_actual))
+                    pred_mean = float(np.mean(baseline_pred))
+                    if pred_mean > 0:
+                        ratio = actual_mean / pred_mean
+                        # Keep calibration stable and avoid extreme jumps.
+                        ratio = float(np.clip(ratio, 0.6, 2.0))
+                        predictions = predictions * ratio
+            except Exception as e:
+                logger.warning(f"Prediction calibration skipped: {e}")
             
             # Build an uncertainty band from recent volatility to avoid invisible/flat intervals.
             recent_hist = np.array(sales_history[-30:], dtype=float)
