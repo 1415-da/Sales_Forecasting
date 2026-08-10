@@ -54,17 +54,17 @@ st.markdown("Generate sales predictions using trained ML models")
 
 # Sidebar for model loading
 with st.sidebar:
-    st.header("📦 Model Configuration")
+    st.header(" Model Configuration")
     
     if not st.session_state.models_loaded:
-        st.warning("⚠️ No models loaded")
+        st.warning(" No models loaded")
     else:
-        st.success("✅ Models loaded")
+        st.success(" Models loaded")
         st.info(f"Models: {', '.join(st.session_state.model_loader.models.keys())}")
         if st.session_state.run_id:
             st.caption(f"Run ID: {st.session_state.run_id[:8]}...")
     
-    if st.button("🔄 Load/Reload Models", type="primary", use_container_width=True):
+    if st.button(" Load/Reload Models", type="primary", use_container_width=True):
         with st.spinner("Loading models..."):
             # Get latest run or use specific run
             run_id = st.session_state.model_loader.get_latest_run()
@@ -76,10 +76,10 @@ with st.sidebar:
             if run_id and st.session_state.model_loader.load_models_from_run(run_id):
                 st.session_state.models_loaded = True
                 st.session_state.run_id = run_id
-                st.success("✅ Models loaded!")
+                st.success(" Models loaded!")
                 st.rerun()
             else:
-                st.error("❌ Failed to load models")
+                st.error(" Failed to load models")
     
     st.markdown("---")
     
@@ -101,7 +101,7 @@ with st.sidebar:
 # Main content
 if st.session_state.models_loaded:
     # Input tabs
-    tab1, tab2, tab3 = st.tabs(["📤 Upload Data", "✏️ Manual Entry", "🎲 Sample Data"])
+    tab1, tab2, tab3 = st.tabs([" Upload Data", " Manual Entry", " Sample Data"])
     
     input_data = st.session_state.input_data
     if st.session_state.input_source:
@@ -118,7 +118,7 @@ if st.session_state.models_loaded:
         
         if uploaded_file is not None:
             uploaded_df = pd.read_csv(uploaded_file)
-            st.success(f"✅ Loaded {len(uploaded_df)} records")
+            st.success(f" Loaded {len(uploaded_df)} records")
             
             # Show preview
             with st.expander("Data Preview"):
@@ -141,11 +141,11 @@ if st.session_state.models_loaded:
                     )
                     if st.button("Convert Uploaded Sales to Hundreds (/10)", key="uploaded_scale_hundreds_btn"):
                         uploaded_df['sales'] = uploaded_df['sales'] / 10.0
-                        st.success("✅ Converted uploaded sales to hundreds scale")
+                        st.success(" Converted uploaded sales to hundreds scale")
                 if st.button("Use Uploaded Data", key="uploaded_btn"):
                     st.session_state.input_data = uploaded_df
                     st.session_state.input_source = "Uploaded CSV"
-                    st.success("✅ Uploaded data selected for prediction")
+                    st.success(" Uploaded data selected for prediction")
     
     with tab2:
         st.markdown("### Enter Recent Sales Data")
@@ -215,7 +215,7 @@ if st.session_state.models_loaded:
             input_data = pd.DataFrame(manual_data)
             st.session_state.input_data = input_data
             st.session_state.input_source = "Manual Entry"
-            st.success("✅ Manual data ready for prediction")
+            st.success(" Manual data ready for prediction")
     
     with tab3:
         st.markdown("### Generate Sample Data")
@@ -283,7 +283,7 @@ if st.session_state.models_loaded:
             st.session_state.input_data = input_data
             st.session_state.input_source = "Sample Data"
             
-            st.success("✅ Sample data generated")
+            st.success(" Sample data generated")
             
             # Show chart
             fig = go.Figure()
@@ -305,15 +305,15 @@ if st.session_state.models_loaded:
     input_data = st.session_state.input_data
     if input_data is not None:
         st.markdown("---")
-        st.header("📊 Generate Forecast")
+        st.header(" Generate Forecast")
         st.caption(
             f"Current active dataset: {len(input_data)} rows, {len(input_data.columns)} columns"
         )
-        with st.expander("🧾 Current active columns", expanded=False):
+        with st.expander(" Current active columns", expanded=False):
             st.write(", ".join([str(col) for col in input_data.columns.tolist()]))
             st.dataframe(input_data.head(5), use_container_width=True)
 
-        if st.button("🚀 Run Prediction", type="primary", use_container_width=True, key="run_prediction"):
+        if st.button(" Run Prediction", type="primary", use_container_width=True, key="run_prediction"):
             with st.spinner("Generating forecast..."):
                 # Run prediction
                 results = st.session_state.predictor.predict(
@@ -323,13 +323,13 @@ if st.session_state.models_loaded:
                 )
                     
                 if results['success']:
-                    st.success("✅ Forecast generated successfully!")
+                    st.success(" Forecast generated successfully!")
 
                     unit_suffix = " ($)"
                     unit_axis = "Sales ($)"
                         
                     # Show metrics
-                    st.markdown("### 📈 Forecast Summary")
+                    st.markdown("###  Forecast Summary")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
                         st.metric(
@@ -353,7 +353,7 @@ if st.session_state.models_loaded:
                         )
                         
                     # Visualization
-                    st.markdown("### 📊 Forecast Visualization")
+                    st.markdown("###  Forecast Visualization")
                     st.info(
                         "This chart compares historical sales (blue) with forecasted sales (green). "
                         "The shaded band shows the 95% confidence range (lower to upper bound), "
@@ -439,7 +439,7 @@ if st.session_state.models_loaded:
                         forecast_only["upper_bound"] - forecast_only["lower_bound"]
                     )
 
-                    st.markdown("### 📈 Cumulative Forecast")
+                    st.markdown("###  Cumulative Forecast")
                     st.caption(
                         "Running total of predicted sales across the forecast period. "
                         "Use this to compare expected revenue against targets."
@@ -471,7 +471,7 @@ if st.session_state.models_loaded:
                     )
                     st.plotly_chart(cumulative_fig, use_container_width=True)
 
-                    st.markdown("### 📏 Prediction Interval Width")
+                    st.markdown("###  Prediction Interval Width")
                     st.caption(
                         "Shows forecast uncertainty over time as (upper bound - lower bound). "
                         "Higher values mean lower confidence for that date."
@@ -495,7 +495,7 @@ if st.session_state.models_loaded:
                     )
                     st.plotly_chart(width_fig, use_container_width=True)
 
-                    st.markdown("### 🗓️ Forecast Intensity Calendar Heatmap")
+                    st.markdown("###  Forecast Intensity Calendar Heatmap")
                     st.caption(
                         "Highlights busy vs slow forecast days. Darker cells indicate higher predicted sales, "
                         "helping with staffing, inventory, and campaign planning."
@@ -546,7 +546,7 @@ if st.session_state.models_loaded:
                     )
                     st.plotly_chart(heatmap_fig, use_container_width=True)
                         
-                    st.markdown("### 💾 Export Results")
+                    st.markdown("###  Export Results")
 
                     col1, col2 = st.columns(2)
                     with col1:
@@ -566,15 +566,15 @@ if st.session_state.models_loaded:
                         st.info("Forecast includes predictions with confidence intervals")
                     
                 else:
-                    st.error(f"❌ Prediction failed: {results['error']}")
+                    st.error(f" Prediction failed: {results['error']}")
 
 else:
     # No models loaded
-    st.warning("⚠️ Please load models using the sidebar before making predictions.")
-    st.info("👈 Click 'Load/Reload Models' in the sidebar to begin")
+    st.warning(" Please load models using the sidebar before making predictions.")
+    st.info(" Click 'Load/Reload Models' in the sidebar to begin")
     
     # Add helpful information
-    with st.expander("ℹ️ No models found? Here's what to do:", expanded=True):
+    with st.expander("ℹ No models found? Here's what to do:", expanded=True):
         st.markdown("""
         ### First Time Setup
         
@@ -586,7 +586,7 @@ else:
         
         2. **Run the Training DAG**:
         - Find `sales_forecast_training` in the DAG list
-        - Click the play button (▶️) to trigger it
+        - Click the play button (▶) to trigger it
         - Wait for training to complete (5-10 minutes)
         
         3. **Come back here**:
