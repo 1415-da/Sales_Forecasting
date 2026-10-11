@@ -47,6 +47,8 @@ if 'input_data' not in st.session_state:
     st.session_state.input_data = None
 if 'input_source' not in st.session_state:
     st.session_state.input_source = None
+if 'model_metrics' not in st.session_state:
+    st.session_state.model_metrics = {}
 
 # Header
 st.title("🔮 Sales Forecast Inference")
@@ -76,6 +78,7 @@ with st.sidebar:
             if run_id and st.session_state.model_loader.load_models_from_run(run_id):
                 st.session_state.models_loaded = True
                 st.session_state.run_id = run_id
+                st.session_state.model_metrics = st.session_state.model_loader.get_run_metrics(run_id)
                 st.success(" Models loaded!")
                 st.rerun()
             else:
@@ -100,6 +103,62 @@ with st.sidebar:
 
 # Main content
 if st.session_state.models_loaded:
+    if st.session_state.run_id and not st.session_state.model_metrics:
+        st.session_state.model_metrics = st.session_state.model_loader.get_run_metrics(
+            st.session_state.run_id
+        )
+
+    # Training metrics are regression metrics. A confusion matrix only applies to
+    # classification, whereas this application forecasts a continuous sales value.
+    if st.session_state.model_metrics:
+        st.markdown("### Model Performance Metrics")
+        st.caption(
+            "Metrics recorded during model training. Lower RMSE, MAE, and MAPE are better; "
+            "higher R² is better."
+        )
+
+        metric_labels = {
+            "rmse": "RMSE",
+            "mae": "MAE",
+            "mape": "MAPE (%)",
+            "r2": "R²",
+        }
+        metric_colors = {
+            "rmse": "#2563eb",
+            "mae": "#7c3aed",
+            "mape": "#ea580c",
+            "r2": "#16a34a",
+        }
+        metrics_fig = go.Figure()
+        for metric_key, label in metric_labels.items():
+            model_names = []
+            values = []
+            for model_name, metrics in st.session_state.model_metrics.items():
+                if metric_key in metrics:
+                    model_names.append(model_name.replace("_", " ").title())
+                    values.append(metrics[metric_key])
+            if values:
+                metrics_fig.add_trace(
+                    go.Bar(
+                        name=label,
+                        x=model_names,
+                        y=values,
+                        marker_color=metric_colors[metric_key],
+                        text=[f"{value:.3f}" for value in values],
+                        textposition="auto",
+                    )
+                )
+
+        metrics_fig.update_layout(
+            title="Training Metrics by Model",
+            xaxis_title="Model",
+            yaxis_title="Metric Value",
+            barmode="group",
+            height=420,
+            legend_title="Metric",
+        )
+        st.plotly_chart(metrics_fig, use_container_width=True)
+
     # Input tabs
     tab1, tab2, tab3 = st.tabs([" Upload Data", " Manual Entry", " Sample Data"])
     

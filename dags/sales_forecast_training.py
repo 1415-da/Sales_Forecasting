@@ -35,24 +35,24 @@ default_args = {
 def sales_forecast_training():
     @task()
     def extract_data_task():
-        from include.utils.data_generator import RealisticSalesDataGenerator
+        from include.data_providers.factory import get_data_provider
 
-        # Use a stable path inside the Airflow container. `/tmp` can be cleaned up
-        # or differ across task processes/executors, which can lead to partial/corrupt reads.
-        data_output_dir = "/usr/local/airflow/data/sales_data"
-        generator = RealisticSalesDataGenerator(
-            start_date="2021-01-01", end_date="2021-12-31"
-        )
-        print("Generating realistic sales data...")
-        file_paths = generator.generate_sales_data(output_dir=data_output_dir)
-        total_files = sum(len(paths) for paths in file_paths.values())
-        print(f"Generated {total_files} files:")
-        for data_type, paths in file_paths.items():
+        provider = get_data_provider()
+        result = provider.provide()
+        lineage = result.lineage
+        print(f"Data source: {lineage.get('data_source')} version={lineage.get('dataset_version')}")
+        print(f"Dataset hash: {lineage.get('dataset_hash')}")
+        print(f"Regenerated: {lineage.get('regenerated')}")
+        print(f"Rows: {lineage.get('row_count')} stores={lineage.get('store_count')}")
+        print(f"Output dir: {result.data_output_dir}")
+        print(f"Total files: {result.total_files}")
+        for data_type, paths in result.file_paths.items():
             print(f"  - {data_type}: {len(paths)} files")
         return {
-            "data_output_dir": data_output_dir,
-            "file_paths": file_paths,
-            "total_files": total_files,
+            "data_output_dir": result.data_output_dir,
+            "file_paths": result.file_paths,
+            "total_files": result.total_files,
+            "lineage": lineage,
         }
 
     @task()
@@ -126,11 +126,20 @@ def sales_forecast_training():
 
     @task()
     def train_models_task(extract_result, validation_summary):
+        from include.data_providers.factory import load_data_config
+
         file_paths = extract_result["file_paths"]
-        print("Loading sales data from multiple files...")
+        data_cfg = load_data_config()
+        max_files = data_cfg.get("max_sales_files")
+        sales_file_list = file_paths["sales"]
+        if max_files is not None:
+            sales_file_list = sales_file_list[: int(max_files)]
+        print(
+            f"Loading sales data from {len(sales_file_list)} of "
+            f"{len(file_paths['sales'])} daily parquet files..."
+        )
         sales_dfs = []
-        max_files = 50
-        for i, sales_file in enumerate(file_paths["sales"][:max_files]):
+        for i, sales_file in enumerate(sales_file_list):
             df = pd.read_parquet(sales_file)
             sales_dfs.append(df)
             if (i + 1) % 10 == 0:
@@ -208,7 +217,12 @@ def sales_forecast_training():
             f"Train shape: {train_df.shape}, Val shape: {val_df.shape}, Test shape: {test_df.shape}"
         )
         results = trainer.train_all_models(
-            train_df, val_df, test_df, target_col="sales", use_optuna=True
+            train_df,
+            val_df,
+            test_df,
+            target_col="sales",
+            use_optuna=True,
+            dataset_lineage=extract_result.get("lineage"),
         )
         for model_name, model_results in results.items():
             if "metrics" in model_results:
@@ -235,6 +249,7 @@ def sales_forecast_training():
         return {
             "training_results": serializable_results,
             "mlflow_run_id": current_run_id,
+            "data_lineage": extract_result.get("lineage"),
         }
 
     @task()
@@ -277,6 +292,7 @@ def sales_forecast_training():
         results = training_result["training_results"]
         report = {
             "timestamp": datetime.now().isoformat(),
+            "data_lineage": training_result.get("data_lineage"),
             "data_summary": {
                 "total_rows": (
                     validation_summary.get("total_rows", 0) if validation_summary else 0
@@ -319,7 +335,7 @@ def sales_forecast_training():
     report = generate_performance_report_task(training_result, validation_summary)
     cleanup = BashOperator(
         task_id="cleanup",
-        bash_command="rm -rf /usr/local/airflow/data/sales_data /tmp/performance_report.json || true",
+        bash_command="rm -f /tmp/performance_report.json || true",
     )
     report >> cleanup
 

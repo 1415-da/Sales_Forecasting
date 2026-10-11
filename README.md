@@ -76,7 +76,9 @@ This will start:
 ## 📊 ML Pipeline Features
 
 ### Data Processing
-- Synthetic data generation with realistic patterns
+- **Pluggable, versioned training data** — default **`kaggle_m5`** via [kagglehub](https://github.com/Kaggle/kagglehub) (`m5-forecasting-accuracy`); see `data/README.md`
+- **Deterministic synthetic benchmark** (`random_seed`, `dataset_version`, content hash → MLflow)
+- Cached parquet under `data/raw/{source}/{version}/` (no delete-on-cleanup)
 - Time-based train/validation/test splitting
 - Comprehensive data validation and quality checks
 - Advanced feature engineering (lags, rolling stats, seasonality)

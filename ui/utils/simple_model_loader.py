@@ -162,6 +162,26 @@ class SimpleModelLoader:
         except Exception as e:
             logger.error(f"Error getting latest run: {e}")
             return None
+
+    def get_run_metrics(self, run_id: str) -> Dict[str, Dict[str, float]]:
+        """Return the tracked regression metrics, grouped by model, for a run."""
+        try:
+            run_metrics = mlflow.tracking.MlflowClient().get_run(run_id).data.metrics
+            metric_names = {"rmse", "mae", "mape", "r2"}
+            grouped_metrics: Dict[str, Dict[str, float]] = {}
+
+            for metric_key, value in run_metrics.items():
+                for metric_name in metric_names:
+                    suffix = f"_{metric_name}"
+                    if metric_key.endswith(suffix):
+                        model_name = metric_key[:-len(suffix)]
+                        grouped_metrics.setdefault(model_name, {})[metric_name] = float(value)
+                        break
+
+            return grouped_metrics
+        except Exception as e:
+            logger.warning(f"Could not retrieve metrics for run {run_id}: {e}")
+            return {}
     
     def predict_ensemble(self, X: np.ndarray) -> np.ndarray:
         """Make ensemble predictions by averaging available models"""

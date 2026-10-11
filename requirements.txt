@@ -14,6 +14,9 @@ statsmodels
 mlflow
 boto3
 
+# Kaggle datasets (M5 training)
+kagglehub
+
 # Data validation
 pandera
 

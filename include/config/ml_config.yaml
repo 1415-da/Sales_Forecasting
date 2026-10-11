@@ -1,3 +1,20 @@
+# Training data source (pluggable providers in include/data_providers/)
+data:
+  source: kaggle_m5              # synthetic | local_csv | kaggle_m5
+  dataset_version: v1.0.0
+  schema_version: v1
+  random_seed: 42
+  train_start_date: "2011-01-29"
+  train_end_date: "2016-04-24"
+  raw_path: "/usr/local/airflow/data/raw/kaggle_m5/v1.0.0"
+  processed_path: "/usr/local/airflow/data/processed/kaggle_m5/v1.0.0"
+  regenerate: false              # true = re-ingest from Kaggle CSVs; false = reuse parquet cache
+  archive_to_minio: false
+  kaggle_competition: m5-forecasting-accuracy
+  kaggle_download: true          # uses kagglehub.competition_download(...)
+  kaggle_competition_path: ""    # optional: skip download if CSVs already on disk
+  max_sales_files: 365           # daily parquet files loaded for training (raise or omit key for all)
+
 # MLflow Configuration
 mlflow:
   tracking_uri: "${MLFLOW_TRACKING_URI:-http://mlflow:5001}"

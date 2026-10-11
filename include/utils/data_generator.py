@@ -13,9 +13,19 @@ logger = logging.getLogger(__name__)
 class RealisticSalesDataGenerator:
     """Generate realistic sales data with multiple files, partitions, and business patterns"""
     
-    def __init__(self, start_date: str = "2022-01-01", end_date: str = "2023-12-31"):
+    def __init__(
+        self,
+        start_date: str = "2022-01-01",
+        end_date: str = "2023-12-31",
+        random_seed: int = 42,
+        dataset_version: str = "v1.0.0",
+    ):
         self.start_date = pd.to_datetime(start_date)
         self.end_date = pd.to_datetime(end_date)
+        self.random_seed = random_seed
+        self.dataset_version = dataset_version
+        random.seed(random_seed)
+        np.random.seed(random_seed)
         self.us_holidays = holidays.US()
         
         # Store configurations
@@ -410,6 +420,8 @@ class RealisticSalesDataGenerator:
             'generation_date': datetime.now().isoformat(),
             'start_date': self.start_date.isoformat(),
             'end_date': self.end_date.isoformat(),
+            'random_seed': self.random_seed,
+            'dataset_version': self.dataset_version,
             'n_stores': len(self.stores),
             'n_products': len(self.all_products),
             'file_counts': {k: len(v) for k, v in file_paths.items()},

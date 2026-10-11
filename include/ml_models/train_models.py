@@ -17,6 +17,7 @@ import optuna
 import mlflow
 
 from utils.mlflow_utils import MLflowManager
+from utils.dataset_lineage import DatasetLineage
 from feature_engineering.feature_pipeline import FeatureEngineer
 from data_validation.validators import DataValidator
 from ml_models.diagnostics import diagnose_model_performance
@@ -310,7 +311,8 @@ class ModelTrainer:
     
     def train_all_models(self, train_df: pd.DataFrame, val_df: pd.DataFrame,
                         test_df: pd.DataFrame, target_col: str = 'sales',
-                        use_optuna: bool = True) -> Dict[str, Dict[str, Any]]:
+                        use_optuna: bool = True,
+                        dataset_lineage: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
         
         results = {}
         
@@ -321,6 +323,32 @@ class ModelTrainer:
         )
         
         try:
+            if dataset_lineage:
+                lineage = DatasetLineage(
+                    data_source=dataset_lineage.get("data_source", "unknown"),
+                    dataset_version=dataset_lineage.get("dataset_version", "unknown"),
+                    schema_version=dataset_lineage.get("schema_version", "v1"),
+                    random_seed=dataset_lineage.get("random_seed"),
+                    date_range_start=str(dataset_lineage.get("date_range_start", "")),
+                    date_range_end=str(dataset_lineage.get("date_range_end", "")),
+                    dataset_hash=dataset_lineage.get("dataset_hash", ""),
+                    row_count=int(dataset_lineage.get("row_count", 0)),
+                    store_count=int(dataset_lineage.get("store_count", 0)),
+                    product_count=int(dataset_lineage.get("product_count", 0)),
+                    raw_path=str(dataset_lineage.get("raw_path", "")),
+                    file_counts=dataset_lineage.get("file_counts") or {},
+                    regenerated=bool(dataset_lineage.get("regenerated", True)),
+                )
+                params = lineage.to_mlflow_params()
+                for extra_key in (
+                    "kaggle_competition",
+                    "kaggle_source_dir",
+                    "kaggle_sales_csv",
+                ):
+                    if dataset_lineage.get(extra_key):
+                        params[f"data.{extra_key}"] = dataset_lineage[extra_key]
+                self.mlflow_manager.log_params(params)
+
             # Preprocess data
             X_train, X_val, X_test, y_train, y_val, y_test = self.preprocess_features(
                 train_df, val_df, test_df, target_col
