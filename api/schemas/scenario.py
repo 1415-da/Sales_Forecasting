@@ -47,6 +47,7 @@ class ScenarioType(str, Enum):
     TRAFFIC = "traffic"
     CLOSURE = "closure"
     HOLIDAY = "holiday"
+    PRICE = "price"
     CUSTOM = "custom"
 
 

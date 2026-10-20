@@ -44,6 +44,7 @@ DEFAULT_ENABLED_SCENARIO_TYPES: Tuple[ScenarioType, ...] = (
     ScenarioType.TRAFFIC,
     ScenarioType.CLOSURE,
     ScenarioType.HOLIDAY,
+    ScenarioType.PRICE,
     ScenarioType.CUSTOM,
 )
 
@@ -114,6 +115,23 @@ _CAPABILITY_SPECS: Dict[ScenarioType, Dict[str, Any]] = {
         "optional": ["duration_days", "promotion_intensity"],
         "constraints": {"holiday_default_uplift": HOLIDAY_DEFAULT_UPLIFT},
         "notes": None,
+    },
+    ScenarioType.PRICE: {
+        "label": "Price change",
+        "description": (
+            "Model a price move over a date window and compare it against the "
+            "current-price baseline."
+        ),
+        "required": ["start_date", "end_date"],
+        "optional": ["duration_days", "discount_depth", "custom_overrides"],
+        "constraints": {
+            "discount_depth_min": DISCOUNT_DEPTH_MIN,
+            "discount_depth_max": DISCOUNT_DEPTH_MAX,
+        },
+        "notes": (
+            "ScenarioAssumptions has no dedicated price lever yet; express the move "
+            "via discount_depth or custom_overrides until the price engine lands."
+        ),
     },
     ScenarioType.CUSTOM: {
         "label": "Custom overrides",
