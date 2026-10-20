@@ -213,6 +213,19 @@ class ScenarioComparisonResponse(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     schema_version: str = SCENARIO_SCHEMA_VERSION
 
+    # Additive, nullable: dataset lineage for the model behind this comparison,
+    # populated by DatasetLineageService.attach_lineage. Typed as a mapping
+    # rather than the lineage model itself to keep schemas free of a dependency
+    # on services; moving ScenarioDatasetLineage into api/schemas/ would let
+    # this be strongly typed.
+    dataset_lineage: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Lineage of the training dataset behind this model version, "
+            "including lineage_status when it could not be fully resolved."
+        ),
+    )
+
 
 class ScenarioComparisonErrorResponse(BaseModel):
     """Structured error body for comparison failures."""
