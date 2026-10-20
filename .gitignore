@@ -213,3 +213,16 @@ data/**
 *.csv
 !sample_data.csv
 
+
+# Node / Next.js frontend
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+.vitest/
+npm-debug.log*
+yarn-error.log*
+
+# The Python `lib/` packaging pattern above also matches the frontend's
+# source directory; re-include it explicitly.
+!frontend/lib/
