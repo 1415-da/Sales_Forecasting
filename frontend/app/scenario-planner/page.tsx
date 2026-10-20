@@ -16,6 +16,20 @@ import { useCallback, useMemo, useState } from 'react';
 
 import { ModelSupportCard } from '@/components/scenario/model-support-card';
 import { RunScenarioCard } from '@/components/scenario/run-scenario-card';
+import { ScenarioEmptyState } from '@/components/scenario/scenario-empty-state';
+import { ScenarioErrorState } from '@/components/scenario/scenario-error-state';
+import { ScenarioExportActions } from '@/components/scenario/scenario-export-actions';
+import {
+  ScenarioImpactCards,
+  ScenarioImpactCardsSkeleton,
+} from '@/components/scenario/scenario-impact-cards';
+import { ScenarioImpactTabsCard } from '@/components/scenario/scenario-impact-tabs-card';
+import { ScenarioComparisonChartCardSkeleton } from '@/components/scenario/scenario-comparison-chart-card';
+import {
+  ScenarioInsightCard,
+  ScenarioInsightCardSkeleton,
+} from '@/components/scenario/scenario-insight-card';
+import { ScenarioLimitationsCard } from '@/components/scenario/scenario-limitations-card';
 import { ScenarioAssumptionsCard } from '@/components/scenario/scenario-assumptions-card';
 import { ScenarioContextCard } from '@/components/scenario/scenario-context-card';
 import { ScenarioPageHeader } from '@/components/scenario/scenario-page-header';
@@ -24,6 +38,7 @@ import { useScenarioCapabilities } from '@/hooks/use-scenario-capabilities';
 import { useScenarioForecast } from '@/hooks/use-scenario-forecast';
 import { useScenarioForm } from '@/hooks/use-scenario-form';
 import type { HistoryPoint, ScenarioType } from '@/lib/types/scenario';
+import { buildComparisonCsv, comparisonFileName } from '@/lib/utils/scenario-results';
 
 /** Placeholder store list; replace with the store-directory endpoint. */
 const STORE_OPTIONS = [
@@ -90,19 +105,22 @@ export default function ScenarioPlannerPage() {
     forecast.reset();
   }, [form, forecast]);
 
+  const comparison = forecast.data ?? null;
+
   const handleExport = useCallback(() => {
-    const comparison = forecast.data;
     if (!comparison) return;
-    const blob = new Blob([JSON.stringify(comparison, null, 2)], {
-      type: 'application/json',
+    const blob = new Blob([buildComparisonCsv(comparison)], {
+      type: 'text/csv;charset=utf-8;',
     });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${comparison.scenario_id}.json`;
+    anchor.download = comparisonFileName(comparison, 'csv');
+    document.body.appendChild(anchor);
     anchor.click();
-    URL.revokeObjectURL(url);
-  }, [forecast.data]);
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }, [comparison]);
 
   const capabilityList = useMemo(
     () => capabilities.data?.capabilities ?? [],
@@ -114,7 +132,7 @@ export default function ScenarioPlannerPage() {
       <ScenarioPageHeader
         onReset={handleReset}
         onExport={handleExport}
-        hasResult={Boolean(forecast.data)}
+        hasResult={Boolean(comparison)}
         isResetDisabled={forecast.isPending}
       />
 
@@ -184,14 +202,45 @@ export default function ScenarioPlannerPage() {
           />
         </div>
 
-        {/* Results column: implemented in a later task. */}
-        <section
-          aria-label="Scenario results"
-          className="min-h-[320px] flex-1 rounded-lg border border-dashed p-6"
-        >
-          <p className="text-sm text-muted-foreground">
-            Results appear here once a scenario has been run.
-          </p>
+        <section aria-label="Scenario results" className="min-w-0 flex-1 space-y-4">
+          {forecast.isPending ? (
+            <>
+              <ScenarioImpactCardsSkeleton />
+              <ScenarioComparisonChartCardSkeleton />
+              <ScenarioInsightCardSkeleton />
+            </>
+          ) : forecast.errorPresentation ? (
+            <ScenarioErrorState
+              presentation={forecast.errorPresentation}
+              onRetry={handleRun}
+              isRetrying={forecast.isPending}
+            />
+          ) : comparison ? (
+            <>
+              {/* Staleness is surfaced here too: the figures on screen no
+                  longer match the inputs on the left. */}
+              {form.isStale ? (
+                <p
+                  role="status"
+                  className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+                >
+                  These results reflect the previous assumptions. Update the scenario
+                  to refresh them.
+                </p>
+              ) : null}
+
+              <ScenarioImpactCards comparison={comparison} />
+              <ScenarioImpactTabsCard comparison={comparison} history={history} />
+              <ScenarioInsightCard comparison={comparison} />
+              <ScenarioLimitationsCard comparison={comparison} />
+              <ScenarioExportActions comparison={comparison} />
+            </>
+          ) : (
+            <ScenarioEmptyState
+              isSampleAvailable={false}
+              sampleUnavailableReason="Sample scenarios need a history series, which is not wired up yet."
+            />
+          )}
         </section>
       </div>
 

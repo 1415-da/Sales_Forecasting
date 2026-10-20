@@ -23,6 +23,15 @@
     --input: 214 32% 91%;
     --ring: 222 47% 11%;
     --radius: 0.5rem;
+
+    /* Chart series. Referenced as hsl(var(--token)) inside SVG attributes, so
+       the chart re-themes with the page instead of needing a JS theme hook. */
+    --chart-baseline: 215 16% 47%;
+    --chart-scenario: 221 83% 53%;
+    --chart-positive: 160 84% 39%;
+    --chart-negative: 0 72% 51%;
+    --chart-neutral: 38 92% 50%;
+    --chart-grid: 214 32% 91%;
   }
 
   .dark {
@@ -43,6 +52,13 @@
     --border: 217 33% 17%;
     --input: 217 33% 17%;
     --ring: 213 27% 84%;
+
+    --chart-baseline: 215 20% 65%;
+    --chart-scenario: 213 94% 68%;
+    --chart-positive: 158 64% 52%;
+    --chart-negative: 0 84% 60%;
+    --chart-neutral: 43 96% 56%;
+    --chart-grid: 217 33% 24%;
   }
 
   * {

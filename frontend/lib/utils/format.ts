@@ -192,3 +192,79 @@ export function humanizeIdentifier(value: string | null | undefined): string {
     .trim()
     .replace(/^./, (char) => char.toUpperCase());
 }
+
+/**
+ * A compact number, e.g. `180000` -> `180K`.
+ *
+ * Used for headline figures where precision matters less than legibility.
+ */
+export function formatCompactNumber(
+  value: number | null | undefined,
+  options: NumberFormatOptions = {},
+): string {
+  if (!isFiniteNumber(value)) return EMPTY_VALUE;
+  return new Intl.NumberFormat(options.locale ?? DEFAULT_LOCALE, {
+    notation: 'compact',
+    maximumFractionDigits: options.maximumFractionDigits ?? 1,
+  }).format(value);
+}
+
+/**
+ * A compact amount, with a currency only when one is supplied.
+ *
+ * Deliberately unit-agnostic by default: with the Kaggle M5 dataset the API's
+ * "sales" are unit counts rather than money, so stamping a currency symbol on
+ * them would misrepresent the figure.
+ */
+export function formatCompactValue(
+  value: number | null | undefined,
+  options: NumberFormatOptions = {},
+): string {
+  if (!isFiniteNumber(value)) return EMPTY_VALUE;
+  if (!options.currency) return formatCompactNumber(value, options);
+  return new Intl.NumberFormat(options.locale ?? DEFAULT_LOCALE, {
+    style: 'currency',
+    currency: options.currency,
+    notation: 'compact',
+    maximumFractionDigits: options.maximumFractionDigits ?? 1,
+  }).format(value);
+}
+
+/** A signed compact value, e.g. `+180K`. */
+export function formatSignedCompactValue(
+  value: number | null | undefined,
+  options: NumberFormatOptions = {},
+): string {
+  if (!isFiniteNumber(value)) return EMPTY_VALUE;
+  const formatted = formatCompactValue(Math.abs(value), options);
+  if (value > 0) return `+${formatted}`;
+  if (value < 0) return `-${formatted}`;
+  return formatted;
+}
+
+/** Short weekday label for a heatmap axis, e.g. `Mon`. */
+export function formatWeekdayShort(
+  value: string | null | undefined,
+  options: { locale?: string } = {},
+): string {
+  const parsed = parseIsoDate(value);
+  if (!parsed) return EMPTY_VALUE;
+  return new Intl.DateTimeFormat(options.locale ?? DEFAULT_LOCALE, {
+    weekday: 'short',
+    timeZone: 'UTC',
+  }).format(parsed);
+}
+
+/** Compact date for a dense chart axis, e.g. `Feb 1`. */
+export function formatAxisDate(
+  value: string | null | undefined,
+  options: { locale?: string } = {},
+): string {
+  const parsed = parseIsoDate(value);
+  if (!parsed) return '';
+  return new Intl.DateTimeFormat(options.locale ?? DEFAULT_LOCALE, {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  }).format(parsed);
+}
