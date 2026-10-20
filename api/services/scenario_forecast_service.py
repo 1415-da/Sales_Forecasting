@@ -49,6 +49,14 @@ from api.schemas.scenario_comparison import (
     new_scenario_forecast_id,
     new_scenario_id,
 )
+from api.observability.scenario_logging import (
+    ScenarioLogContext,
+    StageTimer,
+    log_baseline_resolved,
+    log_impact_calculated,
+    log_overrides_applied,
+    log_prediction_completed,
+)
 from api.services.baseline_forecast_service import (
     BaselineForecastService,
     ResolvedModel,
@@ -346,18 +354,36 @@ class ScenarioForecastService:
             self._baseline_provider = CheckpointBaselineProvider()
         return self._baseline_provider
 
-    def create_comparison(self, request: ScenarioRequest) -> ScenarioComparisonResponse:
+    def create_comparison(
+        self,
+        request: ScenarioRequest,
+        log_context: Optional[ScenarioLogContext] = None,
+    ) -> ScenarioComparisonResponse:
         """
         Run a what-if comparison for ``request``.
 
         Both sides are predicted from feature matrices built by the same
         pipeline, so the only difference between them is the overrides the
         scenario applied.
+
+        ``log_context`` is optional: when supplied, each pipeline stage emits a
+        structured event with its own measured duration. Observability is
+        additive here and never alters the result.
         """
         warnings: List[str] = []
+        timer = StageTimer()
+
         baseline = self._resolve_baseline(request, warnings)
         feature_schema = self._load_feature_schema(baseline)
+        if log_context is not None:
+            log_baseline_resolved(
+                log_context,
+                duration_ms=timer.elapsed_ms(),
+                reused=baseline.reused,
+                baseline_forecast_id=baseline.baseline_forecast_id,
+            )
 
+        timer.reset()
         baseline_matrix = self._build_matrix(request, baseline, feature_schema)
         override_result = self.feature_service.apply_scenario(
             future_features=baseline_matrix,
@@ -368,15 +394,43 @@ class ScenarioForecastService:
         )
         if override_result.unsupported_overrides:
             warnings.append(UNSUPPORTED_OVERRIDE_WARNING)
+        if log_context is not None:
+            log_overrides_applied(
+                log_context,
+                duration_ms=timer.elapsed_ms(),
+                applied_features=list(override_result.modified_feature_names),
+                unsupported_features=[
+                    item.feature_name for item in override_result.unsupported_overrides
+                ],
+                modified_days=len(override_result.modified_dates),
+            )
 
+        timer.reset()
         baseline_prediction = self._predict(baseline_matrix, baseline, request, "baseline")
         scenario_prediction = self._predict(
             override_result.scenario_future_features, baseline, request, "scenario"
         )
+        if log_context is not None:
+            log_prediction_completed(
+                log_context,
+                duration_ms=timer.elapsed_ms(),
+                horizon_days=baseline.horizon_days,
+                has_quantiles=scenario_prediction.has_quantiles,
+            )
 
+        timer.reset()
         baseline_daily = self._to_daily(baseline_prediction)
         scenario_daily = self._to_daily(scenario_prediction)
         impact = self.impact_service.compute_impact(baseline_daily, scenario_daily)
+        if log_context is not None:
+            log_impact_calculated(
+                log_context,
+                duration_ms=timer.elapsed_ms(),
+                total_difference=impact.total_difference,
+                total_difference_pct=impact.total_difference_pct,
+                positive_days=impact.positive_days,
+                negative_days=impact.negative_days,
+            )
 
         return ScenarioComparisonResponse(
             scenario_id=new_scenario_id(),

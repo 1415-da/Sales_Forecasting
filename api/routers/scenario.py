@@ -35,6 +35,17 @@ from api.dependencies.scenario import (
     require_privileged_role,
 )
 from api.middleware.error_handler import REQUEST_ID_HEADER, get_request_id, new_request_id
+from api.observability.scenario_logging import (
+    ScenarioLogContext,
+    StageTimer,
+    log_capability_check_completed,
+    log_request_received,
+    log_scenario_completed,
+    log_scenario_failed,
+    log_scenario_rolled_back,
+    log_validation_completed,
+)
+from api.observability.scenario_metrics import get_metrics
 from api.schemas.baseline_forecast import BaselineForecastCheckpoint
 from api.schemas.scenario import DEFAULT_MODEL_VERSION, ScenarioRequest
 from api.schemas.scenario_capabilities import ScenarioCapabilitiesResponse
@@ -284,11 +295,29 @@ def rollback_scenario(
     Nothing is deleted: the rollback is appended to the audit trail and the
     baseline forecast is left intact.
     """
-    return rollback_service.rollback_scenario(
+    timer = StageTimer()
+    result = rollback_service.rollback_scenario(
         scenario_id=scenario_id,
         reason=body.reason,
         request_id=get_request_id(),
     )
+
+    get_metrics().record_rollback("succeeded" if result.rolled_back else "failed")
+    log_scenario_rolled_back(
+        ScenarioLogContext(
+            request_id=result.request_id or get_request_id() or "unknown",
+            store_id="unknown",
+            model_version="unknown",
+            scenario_type="unknown",
+            scenario_id=scenario_id,
+            baseline_forecast_id=result.baseline_forecast_id,
+        ),
+        reason=body.reason,
+        duration_ms=timer.elapsed_ms(),
+        audit_preserved=result.audit_history_preserved,
+        baseline_preserved=result.baseline_preserved,
+    )
+    return result
 
 
 @router.get(
@@ -345,11 +374,32 @@ def _run_comparison(
     payload = request.model_dump(mode="json")
     scenario_type = request.scenario.scenario_type.value
     model_version = request.model_version or DEFAULT_MODEL_VERSION
+    metrics = get_metrics()
+
+    log_context = ScenarioLogContext(
+        request_id=request_id,
+        store_id=request.store_id,
+        model_version=model_version,
+        scenario_type=scenario_type,
+        baseline_forecast_id=request.baseline_forecast_id,
+    )
+    # The payload itself is never logged -- it carries the caller's sales
+    # history. Only its shape is.
+    log_request_received(
+        log_context,
+        horizon_days=request.horizon_days,
+        history_rows=len(request.history),
+        idempotency_key_present=bool(idempotency_key),
+    )
+    # Pydantic validated the request before this handler ran, so reaching here
+    # means validation passed.
+    log_validation_completed(log_context, duration_ms=0, ok=True)
 
     # Idempotent replay happens before anything is recorded or computed.
     replay = audit_service.resolve_idempotent_request(idempotency_key, payload)
     if replay:
         logger.info("Replaying idempotent scenario for key=%s", idempotency_key)
+        metrics.record_request(scenario_type, "replayed")
         return ScenarioComparisonResponse.model_validate(replay)
 
     audit_service.record_safely(
@@ -375,25 +425,46 @@ def _run_comparison(
         ),
     }
     started = time.perf_counter()
+    stage_clock = StageTimer()
 
     try:
         _assert_scenario_supported(request, capability_service)
     except Exception as exc:
+        metrics.record_capability_check(scenario_type, supported=False)
+        log_capability_check_completed(
+            log_context,
+            duration_ms=stage_clock.elapsed_ms(),
+            supported=False,
+            missing_features=(getattr(exc, "details", {}) or {}).get("missing_features"),
+            error_code=getattr(exc, "error_code", None),
+        )
+        _record_failure(metrics, log_context, exc, scenario_type, "capability_check", started)
         rollback_service.handle_failure(
             stage=ScenarioStage.CAPABILITY_CHECK, exc=exc, **failure_context
         )
         raise
 
+    metrics.record_capability_check(scenario_type, supported=True)
+    log_capability_check_completed(
+        log_context, duration_ms=stage_clock.elapsed_ms(), supported=True
+    )
+
     try:
-        comparison = forecast_service.create_comparison(request)
+        comparison = forecast_service.create_comparison(request, log_context=log_context)
     except Exception as exc:
+        stage = _failure_stage(exc)
+        _record_failure(metrics, log_context, exc, scenario_type, stage.value, started)
         rollback_service.handle_failure(
-            stage=_failure_stage(exc),
+            stage=stage,
             exc=exc,
             duration_ms=_elapsed_ms(started),
             **failure_context,
         )
         raise
+
+    log_context = log_context.with_scenario_id(comparison.scenario_id)
+    log_context.baseline_forecast_id = comparison.baseline_forecast_id
+    metrics.record_baseline(reused=comparison.baseline_reused)
 
     try:
         audit_service.record(
@@ -414,6 +485,7 @@ def _run_comparison(
         # The forecast succeeded but could not be recorded. Partial results are
         # not returned: a comparison the caller could never retrieve again, and
         # that no audit trail covers, is worse than a clean failure.
+        _record_failure(metrics, log_context, exc, scenario_type, "persistence", started)
         rollback_service.handle_failure(
             stage=ScenarioStage.PERSISTENCE,
             exc=exc,
@@ -423,7 +495,38 @@ def _run_comparison(
         )
         raise
 
+    duration_ms = _elapsed_ms(started)
+    metrics.record_request(scenario_type, "completed")
+    metrics.record_duration(scenario_type, duration_ms / 1000)
+    log_scenario_completed(
+        log_context,
+        duration_ms=duration_ms,
+        baseline_reused=comparison.baseline_reused,
+        partial=bool(comparison.unsupported_overrides),
+    )
     return comparison
+
+
+def _record_failure(
+    metrics: Any,
+    log_context: ScenarioLogContext,
+    exc: BaseException,
+    scenario_type: str,
+    stage: str,
+    started: float,
+) -> None:
+    """
+    Record a failed comparison once, in metrics and logs.
+
+    Latency is recorded for failures too: a timeout that is never measured
+    hides exactly the problem an operator needs to see.
+    """
+    duration_ms = _elapsed_ms(started)
+    error_code = getattr(exc, "error_code", type(exc).__name__)
+    metrics.record_request(scenario_type, "failed")
+    metrics.record_failure(scenario_type, str(error_code), stage=stage)
+    metrics.record_duration(scenario_type, duration_ms / 1000)
+    log_scenario_failed(log_context, exc, duration_ms=duration_ms, stage=stage)
 
 
 def _assert_scenario_supported(

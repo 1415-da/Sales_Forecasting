@@ -183,8 +183,12 @@ class FakeForecastService:
         self.comparison = comparison
         self.error = error
         self.calls: List[object] = []
+        self.log_contexts: List[object] = []
 
-    def create_comparison(self, request):
+    def create_comparison(self, request, log_context=None):
+        # Mirrors the real service's signature: the route passes a log context
+        # so each pipeline stage can emit a structured event.
+        self.log_contexts.append(log_context)
         self.calls.append(request)
         if self.error:
             raise self.error

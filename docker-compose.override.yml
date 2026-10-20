@@ -34,8 +34,20 @@ services:
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - AWS_DEFAULT_REGION=us-east-1
     depends_on:
-      - mlflow-db
-      - minio
+      mlflow-db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      # The mlflow service runs python:3.11-slim, which has no curl, so the
+      # probe uses the interpreter that is guaranteed to be present.
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
     networks:
       - airflow
       - default
@@ -135,10 +147,114 @@ services:
       - ./ui:/app
       - ./include:/usr/local/airflow/include:ro
     depends_on:
-      - mlflow
-      - minio
+      mlflow:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:8501/_stcore/health || exit 1']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+    networks:
+      - airflow
+      - default
+    restart: unless-stopped
+
+  # PostgreSQL for the Scenario Planner.
+  # A separate database from MLflow's: scenario tables are application state
+  # with their own lifecycle, and sharing MLflow's store would couple the two.
+  scenario-db:
+    image: postgres:16-alpine
+    platform: linux/arm64
+    environment:
+      POSTGRES_USER: ${SCENARIO_DB_USER:-scenario}
+      POSTGRES_PASSWORD: ${SCENARIO_DB_PASSWORD:-scenario}
+      POSTGRES_DB: ${SCENARIO_DB_NAME:-scenario}
+    volumes:
+      - scenario-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${SCENARIO_DB_USER:-scenario}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow
+      - default
+    restart: unless-stopped
+
+  # FastAPI serving layer: Scenario Planner endpoints, health, and metrics.
+  scenario-api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    platform: linux/arm64
+    ports:
+      - '8000:8000'
+    environment:
+      # Service discovery
+      - MLFLOW_TRACKING_URI=http://mlflow:5001
+      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+      - MLFLOW_EXPERIMENT_NAME=sales_forecasting
+      - AWS_ACCESS_KEY_ID=${MINIO_ROOT_USER:-minioadmin}
+      - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
+      - AWS_DEFAULT_REGION=us-east-1
+      - SCENARIO_DATABASE_URL=postgresql+psycopg2://${SCENARIO_DB_USER:-scenario}:${SCENARIO_DB_PASSWORD:-scenario}@scenario-db:5432/${SCENARIO_DB_NAME:-scenario}
+      # Scenario feature flags
+      - SCENARIO_ENABLED_TYPES=${SCENARIO_ENABLED_TYPES:-promotion,traffic,closure,holiday,price,custom}
+      # The training DAG's promotion step does not currently populate the
+      # registry, so the strict Production check is relaxed for local runs.
+      - BASELINE_REQUIRE_PRODUCTION_STAGE=${BASELINE_REQUIRE_PRODUCTION_STAGE:-false}
+      - BASELINE_RESIDUAL_HORIZON_SCALING=${BASELINE_RESIDUAL_HORIZON_SCALING:-true}
+      - BASELINE_FORECAST_TTL_HOURS=${BASELINE_FORECAST_TTL_HOURS:-24}
+      - FEATURE_SCHEMA_ARTIFACT_PATH=${FEATURE_SCHEMA_ARTIFACT_PATH:-feature_schema.json}
+      - DATASET_REGISTRY_PATH=/usr/local/airflow/data/raw
+      - SCENARIO_AUDIT_REQUIRED_ROLE=${SCENARIO_AUDIT_REQUIRED_ROLE:-}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      # Read-only: the API reads dataset manifests for lineage, never writes.
+      - ./data:/usr/local/airflow/data:ro
+    depends_on:
+      scenario-db:
+        condition: service_healthy
+      mlflow:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    networks:
+      - airflow
+      - default
+    restart: unless-stopped
+
+  # Next.js Scenario Planner UI.
+  #
+  # Behind a profile because the frontend has no `next` dependency installed
+  # yet, so it would fail to start by default. Enable with:
+  #   docker compose --profile frontend up frontend
+  frontend:
+    profiles: ['frontend']
+    image: node:22-alpine
+    platform: linux/arm64
+    working_dir: /app
+    command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
+    ports:
+      - '3000:3000'
+    environment:
+      # Server-side only. The browser never receives backend credentials; it
+      # talks to the API through this origin.
+      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      - NODE_ENV=development
+    volumes:
+      - ./frontend:/app
+      - frontend-node-modules:/app/node_modules
+    depends_on:
+      - scenario-api
+    networks:
+      - airflow
+      - default
     restart: unless-stopped
 
 volumes:
   mlflow-db-volume:
   minio-data:
+  scenario-db-volume:
+  frontend-node-modules:
