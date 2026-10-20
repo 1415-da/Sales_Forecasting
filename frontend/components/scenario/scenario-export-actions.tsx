@@ -12,6 +12,10 @@ import type { ScenarioComparisonResponse } from '@/lib/types/scenario';
 
 export interface ScenarioExportActionsProps {
   comparison: ScenarioComparisonResponse;
+  /** Disables export once the scenario has been withdrawn. */
+  isRolledBack?: boolean;
+  /** Warns that the figures no longer match the current inputs. */
+  isStale?: boolean;
   className?: string;
 }
 
@@ -33,6 +37,8 @@ function downloadFile(contents: string, fileName: string, mimeType: string): voi
 
 export function ScenarioExportActions({
   comparison,
+  isRolledBack = false,
+  isStale = false,
   className,
 }: ScenarioExportActionsProps) {
   const handleCsv = useCallback(() => {
@@ -54,18 +60,31 @@ export function ScenarioExportActions({
   return (
     <div className={className}>
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" onClick={handleCsv}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleCsv}
+          disabled={isRolledBack}
+          title={
+            isRolledBack
+              ? 'This scenario was rolled back and cannot be exported'
+              : 'Download the daily comparison as CSV'
+          }
+        >
           <FileDown aria-hidden="true" className="h-4 w-4" />
           Download CSV
         </Button>
-        <Button variant="ghost" size="sm" onClick={handleJson}>
+        <Button variant="ghost" size="sm" onClick={handleJson} disabled={isRolledBack}>
           <FileJson aria-hidden="true" className="h-4 w-4" />
           Download JSON
         </Button>
       </div>
       <p className="mt-1.5 text-xs text-muted-foreground">
-        CSV includes daily baseline and scenario medians with their P10 and P90
-        bounds.
+        {isRolledBack
+          ? 'Export is unavailable for a rolled-back scenario.'
+          : isStale
+            ? 'These figures reflect the previous assumptions; update the scenario before sharing them.'
+            : 'CSV includes daily baseline and scenario medians with their P10 and P90 bounds.'}
       </p>
     </div>
   );

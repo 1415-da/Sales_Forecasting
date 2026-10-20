@@ -54,12 +54,16 @@ export const NETWORK_ERROR_MESSAGE =
   'Could not reach the forecasting service. Check your connection and try again.';
 export const INVALID_RESPONSE_MESSAGE =
   'The forecasting service returned an unexpected response. Please try again.';
+export const TIMEOUT_MESSAGE =
+  'Scenario generation is taking longer than expected. You can retry or check the model registry.';
 
 /** Client-side codes for failures that never reached the API. */
 export const CLIENT_ERROR_CODES = {
   NETWORK_ERROR: 'NETWORK_ERROR',
   INVALID_RESPONSE: 'INVALID_RESPONSE',
   REQUEST_ABORTED: 'REQUEST_ABORTED',
+  /** Distinct from REQUEST_ABORTED: the client gave up, the user did not. */
+  TIMEOUT: 'TIMEOUT',
 } as const;
 
 export type ClientErrorCode = (typeof CLIENT_ERROR_CODES)[keyof typeof CLIENT_ERROR_CODES];
@@ -73,7 +77,23 @@ const RETRYABLE_CODES = new Set<string>([
   'FORECAST_ALIGNMENT_ERROR',
   'INTERNAL_SCENARIO_ERROR',
   CLIENT_ERROR_CODES.NETWORK_ERROR,
+  CLIENT_ERROR_CODES.TIMEOUT,
 ]);
+
+/**
+ * Failures safe to retry *automatically*, without the user asking.
+ *
+ * Narrower than `isRetryableError`, which governs whether to offer a Retry
+ * button. A 500 may be deterministic -- retrying it silently just burns another
+ * inference and delays the error -- so only transport-level and
+ * upstream-unavailable failures qualify.
+ */
+const AUTO_RETRYABLE_CODES = new Set<string>([
+  CLIENT_ERROR_CODES.NETWORK_ERROR,
+  CLIENT_ERROR_CODES.TIMEOUT,
+]);
+
+const AUTO_RETRYABLE_STATUSES = new Set<number>([502, 503]);
 
 /** Codes the user can fix by changing their inputs. */
 const INPUT_CODES = new Set<string>([
@@ -189,6 +209,18 @@ export class ScenarioApiError extends Error {
     );
   }
 
+  /** The client's own deadline elapsed before the server answered. */
+  static timeout(timeoutMs: number): ScenarioApiError {
+    return new ScenarioApiError(
+      {
+        code: CLIENT_ERROR_CODES.TIMEOUT,
+        message: TIMEOUT_MESSAGE,
+        details: { timeout_ms: timeoutMs },
+      },
+      null,
+    );
+  }
+
   /** The caller aborted the request. */
   static aborted(): ScenarioApiError {
     return new ScenarioApiError(
@@ -214,10 +246,24 @@ export function friendlyErrorMessage(code: string | undefined): string {
   if (code === CLIENT_ERROR_CODES.NETWORK_ERROR) return NETWORK_ERROR_MESSAGE;
   if (code === CLIENT_ERROR_CODES.INVALID_RESPONSE) return INVALID_RESPONSE_MESSAGE;
   if (code === CLIENT_ERROR_CODES.REQUEST_ABORTED) return 'Request cancelled.';
+  if (code === CLIENT_ERROR_CODES.TIMEOUT) return TIMEOUT_MESSAGE;
   return GENERIC_ERROR_MESSAGE;
 }
 
-/** Whether a failure is worth retrying. */
+/**
+ * Whether a failure may be retried automatically.
+ *
+ * 422, 404, and 409 are explicitly excluded: a validation problem, a missing
+ * model, and an unsupported scenario are all deterministic.
+ */
+export function isAutoRetryableError(error: unknown): boolean {
+  if (!(error instanceof ScenarioApiError)) return false;
+  if (error.code === CLIENT_ERROR_CODES.REQUEST_ABORTED) return false;
+  if (AUTO_RETRYABLE_CODES.has(error.code)) return true;
+  return error.status !== null && AUTO_RETRYABLE_STATUSES.has(error.status);
+}
+
+/** Whether a failure is worth offering a manual retry for. */
 export function isRetryableError(error: unknown): boolean {
   if (error instanceof ScenarioApiError) {
     if (error.code === CLIENT_ERROR_CODES.REQUEST_ABORTED) return false;
@@ -233,7 +279,11 @@ export function toErrorPresentation(error: unknown): ErrorPresentation {
   const isInput = normalised.isInputError;
 
   return {
-    title: isInput ? 'Check your scenario' : 'Scenario could not be completed',
+    title: isInput
+      ? 'Check your scenario'
+      : normalised.code === CLIENT_ERROR_CODES.TIMEOUT
+        ? 'Still working on it'
+        : 'Scenario could not be completed',
     message: friendlyErrorMessage(normalised.code),
     code: normalised.code,
     severity: isInput ? 'warning' : 'error',

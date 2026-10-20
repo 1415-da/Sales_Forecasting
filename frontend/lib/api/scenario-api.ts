@@ -34,6 +34,14 @@ import { ScenarioApiError, parseErrorResponse } from '@/lib/utils/errors';
 export const REQUEST_ID_HEADER = 'X-Request-ID';
 export const IDEMPOTENCY_KEY_HEADER = 'Idempotency-Key';
 
+/**
+ * Deadline for a scenario comparison.
+ *
+ * Generous because the call runs model inference, but bounded: without it a
+ * stalled request leaves the UI spinning with no way out.
+ */
+export const COMPARISON_TIMEOUT_MS = 60_000;
+
 const SCENARIO_BASE_PATH = '/v1/scenario';
 
 /** Resolve the API origin from the environment, defaulting to a same-origin proxy. */
@@ -73,6 +81,8 @@ export interface RequestOptions {
   /** Reuse an upstream request id instead of generating one. */
   requestId?: string;
   signal?: AbortSignal;
+  /** Client-side deadline in milliseconds. Omit or pass 0 to disable. */
+  timeoutMs?: number;
 }
 
 export interface CreateComparisonOptions extends RequestOptions {
@@ -84,6 +94,45 @@ interface InternalRequest extends RequestOptions {
   path: string;
   body?: unknown;
   idempotencyKey?: string;
+}
+
+/**
+ * Combine a caller's signal with a timeout.
+ *
+ * `AbortSignal.any` would be tidier but is not available everywhere this may
+ * run, so the controller is wired up by hand. The returned `timedOut` flag is
+ * what lets an abort be reported as a timeout rather than a cancellation.
+ */
+function withTimeout(
+  signal: AbortSignal | undefined,
+  timeoutMs: number | undefined,
+): { signal: AbortSignal | undefined; cleanup: () => void; timedOut: () => boolean } {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return { signal, cleanup: () => {}, timedOut: () => false };
+  }
+
+  const controller = new AbortController();
+  let didTimeOut = false;
+
+  const timer = setTimeout(() => {
+    didTimeOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  const onCallerAbort = () => controller.abort();
+  if (signal) {
+    if (signal.aborted) controller.abort();
+    else signal.addEventListener('abort', onCallerAbort, { once: true });
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onCallerAbort);
+    },
+    timedOut: () => didTimeOut,
+  };
 }
 
 /**
@@ -134,6 +183,7 @@ export class ScenarioApiClient {
         idempotencyKey: options.idempotencyKey,
         requestId: options.requestId,
         signal: options.signal,
+        timeoutMs: options.timeoutMs ?? COMPARISON_TIMEOUT_MS,
       },
       scenarioComparisonResponseSchema,
     );
@@ -230,19 +280,25 @@ export class ScenarioApiClient {
       headers[IDEMPOTENCY_KEY_HEADER] = config.idempotencyKey;
     }
 
+    const deadline = withTimeout(config.signal, config.timeoutMs);
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}${config.path}`, {
         method: config.method,
         headers,
         body: config.body === undefined ? undefined : JSON.stringify(config.body),
-        signal: config.signal,
+        signal: deadline.signal,
       });
     } catch (cause) {
+      if (deadline.timedOut()) {
+        throw ScenarioApiError.timeout(config.timeoutMs ?? 0);
+      }
       if (cause instanceof DOMException && cause.name === 'AbortError') {
         throw ScenarioApiError.aborted();
       }
       throw ScenarioApiError.network(cause);
+    } finally {
+      deadline.cleanup();
     }
 
     // Prefer the server's id: it is what appears in the server's own logs.

@@ -16,7 +16,7 @@ import {
   type UseMutationOptions,
   type UseMutationResult,
 } from '@tanstack/react-query';
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import {
   generateIdempotencyKey,
@@ -30,6 +30,7 @@ import type {
 } from '@/lib/types/scenario';
 import {
   ScenarioApiError,
+  isAutoRetryableError,
   reportError,
   toFieldErrors,
   type ErrorPresentation,
@@ -46,6 +47,16 @@ export function seedScenarioDetail(
   comparison: ScenarioComparisonResponse,
 ): void {
   queryClient.setQueryData(scenarioKeys.detail(comparison.scenario_id), comparison);
+}
+
+/** Automatic retries, per the integration contract. */
+export const MAX_AUTO_RETRIES = 2;
+/** First backoff step; doubles each attempt (1s, then 2s). */
+export const RETRY_BASE_DELAY_MS = 1000;
+
+/** Exponential backoff for attempt `failureCount` (0-based). */
+export function retryDelayMs(failureCount: number): number {
+  return RETRY_BASE_DELAY_MS * 2 ** failureCount;
 }
 
 export interface ScenarioForecastVariables {
@@ -85,14 +96,30 @@ export type UseScenarioForecastResult = UseMutationResult<
   fieldErrors: Record<string, string>;
   /** Toast-ready description of the current failure, if any. */
   errorPresentation: ErrorPresentation | null;
+  /**
+   * The last successful comparison, retained across a re-run.
+   *
+   * TanStack clears `data` while a mutation is in flight; keeping the previous
+   * result lets the panel stay populated during an update instead of blanking
+   * out to a skeleton.
+   */
+  lastComparison: ScenarioComparisonResponse | null;
+  /** Whether an automatic retry is currently in progress. */
+  isRetrying: boolean;
+  /** Forget the retained comparison, e.g. after a reset. */
+  clearLastComparison: () => void;
 };
 
 /**
  * Submit scenario comparisons.
  *
- * Retries are deliberately disabled: inference is expensive, and the stage that
- * failed decides whether a retry is even meaningful. The returned error carries
- * `retryable`, so the UI can offer a retry the user chooses explicitly.
+ * Automatic retries are limited to transport-level failures (network, timeout)
+ * and upstream unavailability (502, 503), with exponential backoff. A 422, 404,
+ * or 409 is deterministic, so retrying it would only delay the error; those
+ * surface immediately and the UI offers a manual retry where it makes sense.
+ *
+ * Because each submission reuses one `Idempotency-Key`, an automatic retry
+ * replays the original result rather than paying for a second inference.
  */
 export function useScenarioForecast(
   options: UseScenarioForecastOptions = {},
@@ -101,6 +128,9 @@ export function useScenarioForecast(
   const queryClient = useQueryClient();
   /** Key per in-flight submission, so a retry of the same submit replays. */
   const idempotencyKeyRef = useRef<string | null>(null);
+  const [lastComparison, setLastComparison] = useState<ScenarioComparisonResponse | null>(
+    null,
+  );
 
   const mutation = useMutation<
     ScenarioComparisonResponse,
@@ -141,10 +171,15 @@ export function useScenarioForecast(
     [mutation],
   );
 
+  const clearLastComparison = useCallback(() => setLastComparison(null), []);
+
   return {
     ...mutation,
     runScenario,
     fieldErrors: mutation.error ? toFieldErrors(mutation.error) : {},
     errorPresentation: mutation.error ? mutation.error.toPresentation() : null,
+    lastComparison,
+    isRetrying: mutation.isPending && mutation.failureCount > 0,
+    clearLastComparison,
   };
 }

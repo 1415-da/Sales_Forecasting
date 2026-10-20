@@ -1,6 +1,6 @@
 'use client';
 
-import { AlertCircle, Loader2, Play, RefreshCw } from 'lucide-react';
+import { AlertCircle, Layers, Loader2, Play, RefreshCw } from 'lucide-react';
 
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,12 @@ export interface RunScenarioCardProps {
   /** Server-side failure, already mapped to friendly text. */
   failure?: ErrorPresentation | null;
   onRetry?: () => void;
+  /** True while an automatic retry is in flight. */
+  isRetrying?: boolean;
+  /** Set when a baseline forecast is being reused rather than regenerated. */
+  isReusingBaseline?: boolean;
+  /** Blocks further runs once the scenario has been rolled back. */
+  isRolledBack?: boolean;
   className?: string;
 }
 
@@ -35,11 +41,14 @@ export function RunScenarioCard({
   errors = {},
   failure = null,
   onRetry,
+  isRetrying = false,
+  isReusingBaseline = false,
+  isRolledBack = false,
   className,
 }: RunScenarioCardProps) {
   const messages = Object.entries(errors).filter(([, message]) => Boolean(message));
-  const disabled = isRunning || !canRun;
-  const label = buttonLabel(isRunning, resultStatus);
+  const disabled = isRunning || !canRun || isRolledBack;
+  const label = isRolledBack ? 'Scenario rolled back' : buttonLabel(isRunning, resultStatus);
 
   return (
     <Card className={className}>
@@ -78,7 +87,26 @@ export function RunScenarioCard({
           </Alert>
         ) : null}
 
-        {resultStatus === 'stale' && !isRunning ? (
+        {isReusingBaseline && !isRunning ? (
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Layers aria-hidden="true" className="h-3.5 w-3.5" />
+            Reusing baseline forecast
+          </div>
+        ) : null}
+
+        {isRetrying ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            Connection problem — retrying automatically…
+          </p>
+        ) : null}
+
+        {isRolledBack ? (
+          <p role="status" className="text-xs text-muted-foreground">
+            This scenario was rolled back. Change an assumption to run a new one.
+          </p>
+        ) : null}
+
+        {resultStatus === 'stale' && !isRunning && !isRolledBack ? (
           <p className="text-xs text-muted-foreground">
             Assumptions changed since the last run. Update to refresh the comparison.
           </p>

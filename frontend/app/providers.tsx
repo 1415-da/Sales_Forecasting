@@ -3,7 +3,8 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 
-import { isRetryableError } from '@/lib/utils/errors';
+import { ToastProvider } from '@/components/ui/toast';
+import { isAutoRetryableError } from '@/lib/utils/errors';
 
 /**
  * Client-side providers.
@@ -18,9 +19,10 @@ export function Providers({ children }: { children: ReactNode }) {
       new QueryClient({
         defaultOptions: {
           queries: {
-            // Only transient failures are worth retrying; a 404 will not fix
-            // itself, and retrying it just delays the error.
-            retry: (failureCount, error) => failureCount < 2 && isRetryableError(error),
+            // Only transport-level and upstream-unavailable failures retry; a
+            // 404 or 422 will not fix itself, and retrying it just delays the
+            // error the user needs to see.
+            retry: (failureCount, error) => failureCount < 2 && isAutoRetryableError(error),
             refetchOnWindowFocus: false,
           },
           mutations: { retry: false },
@@ -28,5 +30,9 @@ export function Providers({ children }: { children: ReactNode }) {
       }),
   );
 
-  return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+  return (
+    <QueryClientProvider client={queryClient}>
+      <ToastProvider>{children}</ToastProvider>
+    </QueryClientProvider>
+  );
 }
