@@ -97,39 +97,12 @@ def _ingest_m5_to_store_day_parquet(
     sales_path = _find_file(kaggle_source_dir, names)
     calendar_path = _find_file(kaggle_source_dir, ["calendar.csv"])
 
-    logger.info("Loading M5 sales (this may take several minutes): %s", sales_path)
+    logger.info("Loading M5 sales and calendar: %s", sales_path)
     sales = pd.read_csv(sales_path)
     calendar = pd.read_csv(calendar_path)
 
+    d_to_date = dict(zip(calendar["d"], calendar["date"]))
     id_cols = [c for c in sales.columns if c.startswith("d_")]
-    meta_cols = [
-        c
-        for c in ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
-        if c in sales.columns
-    ]
-    long_df = sales.melt(
-        id_vars=meta_cols, value_vars=id_cols, var_name="d", value_name="units_sold"
-    )
-    long_df = long_df.merge(calendar[["d", "date"]], on="d", how="left")
-    long_df["date"] = pd.to_datetime(long_df["date"])
-    long_df = long_df.rename(columns={"item_id": "product_id"})
-
-    agg = (
-        long_df.groupby(["date", "store_id", "product_id"], as_index=False)
-        .agg({"units_sold": "sum", "cat_id": "first"})
-        .rename(columns={"units_sold": "quantity_sold", "cat_id": "category"})
-    )
-
-    if train_start:
-        agg = agg[agg["date"] >= pd.to_datetime(train_start)]
-    if train_end:
-        agg = agg[agg["date"] <= pd.to_datetime(train_end)]
-
-    agg["revenue"] = agg["quantity_sold"].astype(float)
-    agg["unit_price"] = 1.0
-    agg["discount_percent"] = 0.0
-    agg["cost"] = agg["revenue"] * 0.7
-    agg["profit"] = agg["revenue"] - agg["cost"]
 
     if "event_name_1" in calendar.columns:
         events = calendar[["date", "event_name_1"]].copy()
@@ -139,16 +112,50 @@ def _ingest_m5_to_store_day_parquet(
         os.makedirs(promo_out, exist_ok=True)
         events.to_parquet(os.path.join(promo_out, "promotions.parquet"), index=False)
 
-    for date, group in agg.groupby(agg["date"].dt.date):
-        ts = pd.Timestamp(date)
-        date_str = ts.strftime("%Y-%m-%d")
+    ts_start = pd.to_datetime(train_start) if train_start else None
+    ts_end = pd.to_datetime(train_end) if train_end else None
+
+    store_ids = sales["store_id"]
+    product_ids = sales["item_id"]
+    categories = sales["cat_id"]
+
+    logger.info("Ingesting %d days of M5 sales into partitioned parquet...", len(id_cols))
+    for i, d_col in enumerate(id_cols):
+        date_str = d_to_date.get(d_col)
+        if not date_str:
+            continue
+        ts = pd.Timestamp(date_str)
+        if ts_start and ts < ts_start:
+            continue
+        if ts_end and ts > ts_end:
+            continue
+
+        qty = sales[d_col].fillna(0).astype("int32")
+        rev = qty.astype("float32")
+        day_df = pd.DataFrame(
+            {
+                "date": ts,
+                "store_id": store_ids,
+                "product_id": product_ids,
+                "category": categories,
+                "quantity_sold": qty,
+                "revenue": rev,
+                "unit_price": 1.0,
+                "discount_percent": 0.0,
+                "cost": rev * 0.7,
+                "profit": rev * 0.3,
+            }
+        )
         out_path = os.path.join(
             output_dir,
             f"sales/year={ts.year}/month={ts.month:02d}/day={ts.day:02d}/"
             f"sales_{date_str}.parquet",
         )
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        group.to_parquet(out_path, index=False)
+        day_df.to_parquet(out_path, index=False)
+
+        if (i + 1) % 200 == 0 or i == len(id_cols) - 1:
+            logger.info("Ingested %d / %d days...", i + 1, len(id_cols))
 
     return sales_path
 

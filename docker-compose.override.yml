@@ -2,6 +2,19 @@
 # It will be automatically loaded by docker-compose when running astro dev start
 
 services:
+  scheduler:
+    volumes:
+      - ./data:/usr/local/airflow/data
+  dag-processor:
+    volumes:
+      - ./data:/usr/local/airflow/data
+  triggerer:
+    volumes:
+      - ./data:/usr/local/airflow/data
+  api-server:
+    volumes:
+      - ./data:/usr/local/airflow/data
+
   # MLflow tracking server
   mlflow:
     image: python:3.11-slim

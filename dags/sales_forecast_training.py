@@ -8,19 +8,16 @@ import sys
 # Add include path
 sys.path.append("/usr/local/airflow/include")
 
-from include.ml_models.train_models import ModelTrainer
-from include.utils.mlflow_utils import MLflowManager
-
 
 default_args = {
     "owner": "Sales Forecasting Team",
     "depends_on_past": False,
     "start_date": datetime(2025, 7, 22),
-    "email_on_failure": True,
+    "email_on_failure": False,
     "email_on_retry": False,
-    "email": ["admin@example.com"],
+    "email": ["kg15072004@gmail.com"],
     "retries": 1,
-    "retry_delay": timedelta(minutes=5),
+    "retry_delay": timedelta(seconds=15),
 }
 
 
@@ -161,35 +158,101 @@ def sales_forecast_training():
             .reset_index()
         )
         daily_sales = daily_sales.rename(columns={"revenue": "sales"})
-        if file_paths.get("promotions"):
+        daily_sales["date"] = pd.to_datetime(daily_sales["date"])
+
+        if file_paths.get("promotions") and len(file_paths["promotions"]) > 0 and os.path.exists(file_paths["promotions"][0]):
             promo_df = pd.read_parquet(file_paths["promotions"][0])
-            promo_summary = (
-                promo_df.groupby(["date", "product_id"])["discount_percent"]
-                .max()
-                .reset_index()
-            )
-            promo_summary["has_promotion"] = 1
-            daily_sales = daily_sales.merge(
-                promo_summary[["date", "product_id", "has_promotion"]],
-                on=["date", "product_id"],
-                how="left",
-            )
+            promo_df["date"] = pd.to_datetime(promo_df["date"])
+            if "product_id" in promo_df.columns:
+                target_metric = "discount_percent" if "discount_percent" in promo_df.columns else promo_df.columns[-1]
+                promo_summary = (
+                    promo_df.groupby(["date", "product_id"])[target_metric]
+                    .max()
+                    .reset_index()
+                )
+                promo_summary["has_promotion"] = 1
+                daily_sales = daily_sales.merge(
+                    promo_summary[["date", "product_id", "has_promotion"]],
+                    on=["date", "product_id"],
+                    how="left",
+                )
+            else:
+                # Promotion or event data at date level (e.g. M5 calendar events)
+                if "has_event" in promo_df.columns:
+                    event_summary = (
+                        promo_df.groupby("date")["has_event"]
+                        .max()
+                        .reset_index()
+                        .rename(columns={"has_event": "has_promotion"})
+                    )
+                elif "has_promotion" in promo_df.columns:
+                    event_summary = (
+                        promo_df.groupby("date")["has_promotion"]
+                        .max()
+                        .reset_index()
+                    )
+                else:
+                    event_summary = promo_df[["date"]].drop_duplicates()
+                    event_summary["has_promotion"] = 1
+                daily_sales = daily_sales.merge(
+                    event_summary[["date", "has_promotion"]],
+                    on="date",
+                    how="left",
+                )
+                if "has_event" in promo_df.columns and "is_holiday" not in daily_sales.columns:
+                    holiday_summary = (
+                        promo_df.groupby("date")["has_event"]
+                        .max()
+                        .reset_index()
+                        .rename(columns={"has_event": "is_holiday"})
+                    )
+                    daily_sales = daily_sales.merge(
+                        holiday_summary[["date", "is_holiday"]],
+                        on="date",
+                        how="left",
+                    )
+
+        if "has_promotion" not in daily_sales.columns:
+            daily_sales["has_promotion"] = 0
+        else:
             daily_sales["has_promotion"] = daily_sales["has_promotion"].fillna(0)
+
         if file_paths.get("customer_traffic"):
             traffic_dfs = []
             for traffic_file in file_paths["customer_traffic"][:10]:
-                traffic_dfs.append(pd.read_parquet(traffic_file))
-            traffic_df = pd.concat(traffic_dfs, ignore_index=True)
-            traffic_summary = (
-                traffic_df.groupby(["date", "store_id"])
-                .agg({"customer_traffic": "sum", "is_holiday": "max"})
-                .reset_index()
-            )
-            daily_sales = daily_sales.merge(
-                traffic_summary, on=["date", "store_id"], how="left"
-            )
+                if os.path.exists(traffic_file):
+                    traffic_dfs.append(pd.read_parquet(traffic_file))
+            if traffic_dfs:
+                traffic_df = pd.concat(traffic_dfs, ignore_index=True)
+                traffic_df["date"] = pd.to_datetime(traffic_df["date"])
+                agg_traffic = {}
+                if "customer_traffic" in traffic_df.columns:
+                    agg_traffic["customer_traffic"] = "sum"
+                if "is_holiday" in traffic_df.columns:
+                    agg_traffic["is_holiday"] = "max"
+                if agg_traffic:
+                    traffic_summary = (
+                        traffic_df.groupby(["date", "store_id"])
+                        .agg(agg_traffic)
+                        .reset_index()
+                    )
+                    daily_sales = daily_sales.merge(
+                        traffic_summary, on=["date", "store_id"], how="left"
+                    )
+
+        if "customer_traffic" not in daily_sales.columns:
+            daily_sales["customer_traffic"] = 0
+        else:
+            daily_sales["customer_traffic"] = daily_sales["customer_traffic"].fillna(0)
+
+        if "is_holiday" not in daily_sales.columns:
+            daily_sales["is_holiday"] = 0
+        else:
+            daily_sales["is_holiday"] = daily_sales["is_holiday"].fillna(0)
         print(f"Final training data shape: {daily_sales.shape}")
         print(f"Columns: {daily_sales.columns.tolist()}")
+        from include.ml_models.train_models import ModelTrainer
+
         trainer = ModelTrainer()
         store_daily_sales = (
             daily_sales.groupby(["date", "store_id"])
@@ -243,9 +306,9 @@ def sales_forecast_training():
             }
         import mlflow
 
-        current_run_id = (
-            mlflow.active_run().info.run_id if mlflow.active_run() else None
-        )
+        current_run_id = getattr(trainer, "current_run_id", None)
+        if not current_run_id and mlflow.active_run():
+            current_run_id = mlflow.active_run().info.run_id
         return {
             "training_results": serializable_results,
             "mlflow_run_id": current_run_id,
@@ -254,6 +317,8 @@ def sales_forecast_training():
 
     @task()
     def evaluate_models_task(training_result):
+        from include.utils.mlflow_utils import MLflowManager
+
         results = training_result["training_results"]
         mlflow_manager = MLflowManager()
         best_model_name = None
@@ -264,11 +329,24 @@ def sales_forecast_training():
                     best_rmse = model_results["metrics"]["rmse"]
                     best_model_name = model_name
         print(f"Best model: {best_model_name} with RMSE: {best_rmse:.4f}")
-        best_run = mlflow_manager.get_best_model(metric="rmse", ascending=True)
-        return {"best_model": best_model_name, "best_run_id": best_run["run_id"]}
+        run_id = training_result.get("mlflow_run_id")
+        if not run_id:
+            try:
+                best_run = mlflow_manager.get_best_model(metric="rmse", ascending=True)
+                run_id = best_run["run_id"]
+            except Exception as e:
+                print(f"Fallback searching best run: {e}")
+                exp = mlflow_manager.client.get_experiment_by_name(
+                    mlflow_manager.experiment_name
+                )
+                runs = mlflow_manager.client.search_runs(exp.experiment_id, max_results=1)
+                run_id = runs[0].info.run_id if runs else "unknown"
+        return {"best_model": best_model_name, "best_run_id": run_id}
 
     @task()
     def register_best_model_task(evaluation_result):
+        from include.utils.mlflow_utils import MLflowManager
+
         evaluation_result["best_model"]
         run_id = evaluation_result["best_run_id"]
         mlflow_manager = MLflowManager()
@@ -281,6 +359,8 @@ def sales_forecast_training():
 
     @task()
     def transition_to_production_task(model_versions):
+        from include.utils.mlflow_utils import MLflowManager
+
         mlflow_manager = MLflowManager()
         for model_name, version in model_versions.items():
             mlflow_manager.transition_model_stage(model_name, version, "Production")

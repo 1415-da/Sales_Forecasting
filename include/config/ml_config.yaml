@@ -11,7 +11,7 @@ data:
   regenerate: false              # true = re-ingest from Kaggle CSVs; false = reuse parquet cache
   archive_to_minio: false
   kaggle_competition: m5-forecasting-accuracy
-  kaggle_download: true          # uses kagglehub.competition_download(...)
+  kaggle_download: false         # uses local CSVs from raw_path
   kaggle_competition_path: ""    # optional: skip download if CSVs already on disk
   max_sales_files: 365           # daily parquet files loaded for training (raise or omit key for all)
 

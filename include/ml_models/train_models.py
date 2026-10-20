@@ -321,6 +321,7 @@ class ModelTrainer:
             run_name=f"sales_forecast_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
             tags={"model_type": "ensemble", "use_optuna": str(use_optuna)}
         )
+        self.current_run_id = run_id
         
         try:
             if dataset_lineage:
