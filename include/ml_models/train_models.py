@@ -134,12 +134,40 @@ class ModelTrainer:
         return X_train_scaled, X_val_scaled, X_test_scaled, y_train, y_val, y_test
     
     def calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
-        metrics = {
-            'rmse': np.sqrt(mean_squared_error(y_true, y_pred)),
-            'mae': mean_absolute_error(y_true, y_pred),
-            'mape': np.mean(np.abs((y_true - y_pred) / y_true)) * 100,
-            'r2': r2_score(y_true, y_pred)
+        """
+        Regression metrics for the holdout set.
+
+        MAPE divides by the actual value, so a single zero-sales store-day made
+        it `inf` and the metric was useless. It is now computed over non-zero
+        actuals only, and omitted entirely when none exist rather than reported
+        as a fabricated number.
+
+        WAPE is added because it is defined even when individual actuals are
+        zero (it divides by the total, not per row), which makes it the more
+        trustworthy headline accuracy figure for intermittent demand.
+        """
+        y_true = np.asarray(y_true, dtype=float)
+        y_pred = np.asarray(y_pred, dtype=float)
+
+        metrics: Dict[str, float] = {
+            'rmse': float(np.sqrt(mean_squared_error(y_true, y_pred))),
+            'mae': float(mean_absolute_error(y_true, y_pred)),
+            'r2': float(r2_score(y_true, y_pred)),
+            'bias': float(np.mean(y_pred - y_true)),
         }
+
+        denominator = float(np.sum(np.abs(y_true)))
+        if denominator > 0:
+            metrics['wape'] = float(np.sum(np.abs(y_true - y_pred)) / denominator * 100)
+
+        nonzero = y_true != 0
+        if nonzero.any():
+            metrics['mape'] = float(
+                np.mean(np.abs((y_true[nonzero] - y_pred[nonzero]) / y_true[nonzero])) * 100
+            )
+        else:
+            logger.warning("All holdout actuals are zero; MAPE is undefined and omitted")
+
         return metrics
     
     def train_xgboost(self, X_train: np.ndarray, y_train: np.ndarray,
@@ -732,26 +760,35 @@ class ModelTrainer:
             f.write(html_content)
     
     def save_artifacts(self):
-        # Save scalers and encoders
-        joblib.dump(self.scalers, '/tmp/scalers.pkl')
-        joblib.dump(self.encoders, '/tmp/encoders.pkl')
-        joblib.dump(self.feature_cols, '/tmp/feature_cols.pkl')
-        
-        # Save individual models in the expected format
+        """
+        Upload the run's preprocessing artifacts and model pickles.
+
+        A per-run staging directory is used instead of `/tmp` itself. Logging
+        `/tmp` wholesale uploaded every unrelated temp file in the container
+        into the run -- editor scratch files, uv lock files and stray temp
+        directories all ended up inside Production model artifacts -- and two
+        concurrent runs would overwrite each other's staged files.
+        """
         import os
-        os.makedirs('/tmp/models/xgboost', exist_ok=True)
-        os.makedirs('/tmp/models/lightgbm', exist_ok=True)
-        os.makedirs('/tmp/models/ensemble', exist_ok=True)
-        
-        if 'xgboost' in self.models:
-            joblib.dump(self.models['xgboost'], '/tmp/models/xgboost/xgboost_model.pkl')
-        
-        if 'lightgbm' in self.models:
-            joblib.dump(self.models['lightgbm'], '/tmp/models/lightgbm/lightgbm_model.pkl')
-            
-        if 'ensemble' in self.models:
-            joblib.dump(self.models['ensemble'], '/tmp/models/ensemble/ensemble_model.pkl')
-        
-        self.mlflow_manager.log_artifacts('/tmp/')
-        
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="training_artifacts_") as staging:
+            joblib.dump(self.scalers, os.path.join(staging, 'scalers.pkl'))
+            joblib.dump(self.encoders, os.path.join(staging, 'encoders.pkl'))
+            joblib.dump(self.feature_cols, os.path.join(staging, 'feature_cols.pkl'))
+
+            # Kept in the historical layout so the existing model loaders, which
+            # read models/<name>/<name>_model.pkl, keep working unchanged.
+            for name, filename in (
+                ('xgboost', 'xgboost_model.pkl'),
+                ('lightgbm', 'lightgbm_model.pkl'),
+                ('ensemble', 'ensemble_model.pkl'),
+            ):
+                if name in self.models:
+                    model_dir = os.path.join(staging, 'models', name)
+                    os.makedirs(model_dir, exist_ok=True)
+                    joblib.dump(self.models[name], os.path.join(model_dir, filename))
+
+            self.mlflow_manager.log_artifacts(staging)
+
         logger.info("Artifacts saved successfully")

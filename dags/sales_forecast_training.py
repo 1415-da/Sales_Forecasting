@@ -347,25 +347,53 @@ def sales_forecast_training():
     def register_best_model_task(evaluation_result):
         from include.utils.mlflow_utils import MLflowManager
 
-        evaluation_result["best_model"]
+        best_model = evaluation_result.get("best_model")
         run_id = evaluation_result["best_run_id"]
         mlflow_manager = MLflowManager()
         model_versions = {}
-        for model_name in ["xgboost", "lightgbm"]:
-            version = mlflow_manager.register_model(run_id, model_name, model_name)
+
+        # The ensemble is included because it is the default model the inference
+        # layer asks for; without a registered ensemble there is no Production
+        # version for the serving path to resolve.
+        for model_name in ["xgboost", "lightgbm", "ensemble"]:
+            try:
+                version = mlflow_manager.register_model(run_id, model_name, model_name)
+            except Exception as exc:
+                # One model failing to register must not hide the others, but it
+                # is reported rather than silently skipped.
+                print(f"Could not register {model_name}: {exc}")
+                continue
             model_versions[model_name] = version
             print(f"Registered {model_name} version: {version}")
-        return model_versions
+
+        if not model_versions:
+            raise RuntimeError("No model could be registered; refusing to report success")
+
+        print(f"Best model by holdout RMSE: {best_model}")
+        return {"versions": model_versions, "best_model": best_model}
 
     @task()
-    def transition_to_production_task(model_versions):
+    def transition_to_production_task(registration_result):
         from include.utils.mlflow_utils import MLflowManager
 
         mlflow_manager = MLflowManager()
-        for model_name, version in model_versions.items():
-            mlflow_manager.transition_model_stage(model_name, version, "Production")
-            print(f"Transitioned {model_name} v{version} to Production")
-        return "Models transitioned to production"
+        versions = registration_result.get("versions", registration_result)
+        best_model = registration_result.get("best_model")
+
+        promoted = {}
+        for model_name, version in versions.items():
+            # `transition_model_stage` now reports whether promotion actually
+            # happened, so a silent failure can no longer be printed as success.
+            if mlflow_manager.transition_model_stage(model_name, version, "Production"):
+                promoted[model_name] = version
+                print(f"Transitioned {model_name} v{version} to Production")
+            else:
+                print(f"FAILED to transition {model_name} v{version} to Production")
+
+        if not promoted:
+            raise RuntimeError("No model version could be promoted to Production")
+
+        return {"promoted": promoted, "best_model": best_model}
 
     @task()
     def generate_performance_report_task(training_result, validation_summary):

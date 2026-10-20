@@ -98,10 +98,106 @@ class MLflowManager:
                 with open(metadata_path, 'w') as f:
                     yaml.dump(metadata, f)
                 mlflow.log_artifact(metadata_path, artifact_path=f"models/{model_name}")
-                
+
+            # Additionally log a *real* MLflow model.
+            #
+            # The joblib pickle above is kept because the Streamlit loader reads
+            # it directly, but a pickle is not a registrable MLflow model: it has
+            # no MLmodel descriptor, so `register_model` had nothing to point at
+            # and the registry stayed empty. This writes a proper flavoured model
+            # alongside it, under `mlflow_model/{name}`, which IS registrable.
+            self.log_mlflow_model(model, model_name, input_example=input_example)
+
         except Exception as e:
             logger.error(f"Failed to log model {model_name}: {e}")
             # Don't fail the entire run, just log the error
+
+    def mlflow_model_path(self, model_name: str) -> str:
+        """Artifact path of the registrable MLflow model for `model_name`."""
+        return f"mlflow_model/{model_name}"
+
+    @staticmethod
+    def _ensemble_code_paths() -> List[str]:
+        """
+        Source directories to bundle with a custom-class model.
+
+        Without this, the ensemble's pickle references `ml_models.ensemble_model`
+        and only loads where that package happens to be importable.
+        """
+        try:
+            import ml_models
+
+            package_dir = os.path.dirname(os.path.abspath(ml_models.__file__))
+            return [package_dir] if os.path.isdir(package_dir) else []
+        except Exception as exc:  # noqa: BLE001 - bundling is best effort
+            logger.warning("Could not resolve ml_models for code_paths: %s", exc)
+            return []
+
+    def log_mlflow_model(self, model, model_name: str,
+                        input_example: Optional[pd.DataFrame] = None) -> Optional[str]:
+        """
+        Log a flavoured MLflow model so the version can be registered.
+
+        Uses the native flavour where one exists and falls back to the generic
+        sklearn flavour (the ensemble implements `predict`, which is all the
+        flavour requires). Returns the artifact path, or None on failure.
+        """
+        artifact_path = self.mlflow_model_path(model_name)
+        try:
+            import shutil
+            import tempfile
+
+            # `log_model` is deliberately avoided: the installed client (MLflow
+            # 3.x) routes it through the /api/2.0/mlflow/logged-models endpoint,
+            # which the 2.x tracking server does not implement, so the call
+            # fails outright. `save_model` is purely local and `log_artifacts`
+            # uses the long-standing artifact API, so this works against either
+            # server generation. The uploaded directory still contains a real
+            # MLmodel descriptor, which is all `register_model` needs.
+            with tempfile.TemporaryDirectory() as tmpdir:
+                model_dir = os.path.join(tmpdir, model_name)
+                # save_model requires the destination not to exist.
+                shutil.rmtree(model_dir, ignore_errors=True)
+
+                save_kwargs = {"path": model_dir}
+                if input_example is not None:
+                    save_kwargs["input_example"] = input_example
+
+                if model_name == "xgboost":
+                    mlflow.xgboost.save_model(xgb_model=model, **save_kwargs)
+                elif model_name == "lightgbm":
+                    mlflow.lightgbm.save_model(lgb_model=model, **save_kwargs)
+                else:
+                    # cloudpickle is requested explicitly: the sklearn flavour
+                    # now defaults to skops, which refuses to serialise
+                    # "untrusted" non-sklearn types and so rejects the ensemble
+                    # (it wraps XGBoost and LightGBM boosters).
+                    #
+                    # cloudpickle pickles the class by *reference* whenever its
+                    # module is importable, so a model saved here could only be
+                    # loaded where `ml_models.ensemble_model` was on the path --
+                    # it failed with ModuleNotFoundError anywhere else. The
+                    # module is therefore bundled into the model via code_paths,
+                    # which makes the artifact self-contained.
+                    code_paths = self._ensemble_code_paths()
+                    if code_paths:
+                        save_kwargs["code_paths"] = code_paths
+                    mlflow.sklearn.save_model(
+                        sk_model=model,
+                        serialization_format=mlflow.sklearn.SERIALIZATION_FORMAT_CLOUDPICKLE,
+                        **save_kwargs,
+                    )
+
+                if not os.path.isfile(os.path.join(model_dir, "MLmodel")):
+                    raise RuntimeError("save_model produced no MLmodel descriptor")
+
+                mlflow.log_artifacts(model_dir, artifact_path=artifact_path)
+
+            logger.info("Logged registrable MLflow model at %s", artifact_path)
+            return artifact_path
+        except Exception as e:
+            logger.error("Failed to log MLflow model %s: %s", model_name, e)
+            return None
     
     def log_artifacts(self, artifact_path: str):
         mlflow.log_artifacts(artifact_path)
@@ -167,24 +263,100 @@ class MLflowManager:
                 raise ValueError(f"Cannot load model from {model_uri}")
     
     def register_model(self, run_id: str, model_name: str, artifact_path: str) -> str:
-        """Register model if possible, otherwise return run_id as version"""
-        try:
-            model_uri = f"runs:/{run_id}/{artifact_path}"
-            model_version = mlflow.register_model(model_uri, f"{self.registry_name}_{model_name}")
-            return model_version.version
-        except:
-            logger.warning(f"Model registration not available, using run_id as version")
-            return run_id
+        """
+        Register the run's MLflow model and return the new version number.
+
+        `artifact_path` previously pointed at a bare pickle directory, which is
+        not a registrable model; the registrable path is used instead and the
+        caller's value is only a fallback. A failure is logged with its real
+        cause rather than being hidden behind a bare `except`.
+        """
+        registered_name = f"{self.registry_name}_{model_name}"
+        candidates = [self.mlflow_model_path(model_name), artifact_path]
+
+        last_error: Optional[Exception] = None
+        for path in candidates:
+            try:
+                model_version = mlflow.register_model(f"runs:/{run_id}/{path}", registered_name)
+                logger.info(
+                    "Registered %s version %s from %s", registered_name, model_version.version, path
+                )
+                return str(model_version.version)
+            except Exception as e:
+                last_error = e
+                logger.warning("Could not register %s from '%s': %s", registered_name, path, e)
+
+        logger.error("Model registration failed for %s: %s", registered_name, last_error)
+        raise RuntimeError(f"Could not register {registered_name}: {last_error}") from last_error
     
-    def transition_model_stage(self, model_name: str, version: str, stage: str):
+    def transition_model_stage(self, model_name: str, version: str, stage: str) -> bool:
+        """
+        Promote a model version, and report whether it actually worked.
+
+        The deployed client (MLflow 3.x) removed `transition_model_version_stage`
+        while the tracking server is 2.x, so promotion is done two ways:
+
+        1. a registry **alias** (`@production`), which both versions support and
+           which is the forward-looking mechanism, and
+        2. the server's REST stage endpoint, so readers that still filter on
+           `current_stage == "Production"` keep working.
+
+        Returns True if at least one succeeded. Previously this swallowed every
+        failure, which is why the registry reported no Production model while the
+        DAG logged success.
+        """
+        registered_name = f"{self.registry_name}_{model_name}"
+        alias = stage.strip().lower()
+        succeeded = []
+
         try:
-            self.client.transition_model_version_stage(
-                name=f"{self.registry_name}_{model_name}",
-                version=version,
-                stage=stage
-            )
-        except:
-            logger.warning(f"Model stage transition not available")
+            self.client.set_registered_model_alias(registered_name, alias, version)
+            succeeded.append(f"alias @{alias}")
+        except Exception as e:
+            logger.warning("Could not set alias @%s on %s: %s", alias, registered_name, e)
+
+        try:
+            self._transition_stage_via_rest(registered_name, version, stage)
+            succeeded.append(f"stage {stage}")
+        except Exception as e:
+            logger.warning("Could not set stage %s on %s: %s", stage, registered_name, e)
+
+        if succeeded:
+            logger.info("Promoted %s v%s (%s)", registered_name, version, ", ".join(succeeded))
+            return True
+
+        logger.error("Promotion failed for %s v%s", registered_name, version)
+        return False
+
+    def _transition_stage_via_rest(self, registered_name: str, version: str, stage: str) -> None:
+        """
+        Set a version's stage through the tracking server's REST API.
+
+        Used because the installed client no longer exposes the stage call; the
+        server still implements the endpoint.
+        """
+        import json
+        import urllib.error
+        import urllib.request
+
+        url = f"{self.tracking_uri.rstrip('/')}/api/2.0/mlflow/model-versions/transition-stage"
+        payload = json.dumps(
+            {
+                "name": registered_name,
+                "version": str(version),
+                "stage": stage,
+                "archive_existing_versions": True,
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as response:
+                if response.getcode() not in (200, 201):
+                    raise RuntimeError(f"unexpected status {response.getcode()}")
+        except urllib.error.HTTPError as e:
+            raise RuntimeError(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:200]}") from e
     
     def get_latest_model_version(self, model_name: str, stage: Optional[str] = None) -> Dict[str, Any]:
         try:

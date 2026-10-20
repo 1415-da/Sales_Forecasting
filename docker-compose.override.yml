@@ -19,13 +19,27 @@ services:
   mlflow:
     image: python:3.11-slim
     platform: linux/arm64
-    command: >
-      bash -c "pip install mlflow==2.9.2 psycopg2-binary boto3 && 
-              export MLFLOW_S3_ENDPOINT_URL=http://minio:9000 &&
-              mlflow server --host 0.0.0.0 --port 5001 
-              --backend-store-uri postgresql://mlflow:mlflow@mlflow-db:5432/mlflow 
-              --default-artifact-root s3://mlflow-artifacts/ 
-              --serve-artifacts"
+    # SQLAlchemy is pinned below 2.0 because MLflow 2.9.2 imports
+    # `FallbackAsyncAdaptedQueuePool`, a symbol that only exists in SQLAlchemy
+    # 1.4; with SA 2.x the server crash-loops on startup as soon as a SQL
+    # backend store is configured.
+    #
+    # IMPORTANT: every continuation line below must sit at the SAME indentation.
+    # A more-indented line in a YAML folded block keeps its newline, and a bare
+    # newline terminates a `bash -c` command: the server then started as just
+    # `mlflow server --host 0.0.0.0 --port 5001`, silently dropping the backend
+    # store, the artifact root and --serve-artifacts. MLflow consequently ran on
+    # its default ephemeral /mlruns file store, so run history did not survive a
+    # container recreate and nothing was written to Postgres or MinIO.
+    command:
+      - bash
+      - -lc
+      - >-
+        pip install --no-cache-dir mlflow==2.9.2 "sqlalchemy<2" psycopg2-binary boto3 &&
+        exec mlflow server --host 0.0.0.0 --port 5001
+        --backend-store-uri postgresql://mlflow:mlflow@mlflow-db:5432/mlflow
+        --default-artifact-root s3://mlflow-artifacts/
+        --serve-artifacts
     ports:
       - '5001:5001'
     environment:
@@ -46,8 +60,11 @@ services:
         - python -c "import urllib.request; urllib.request.urlopen('http://localhost:5001/health')"
       interval: 15s
       timeout: 10s
-      retries: 10
-      start_period: 90s
+      retries: 20
+      # Generous: this container installs MLflow at boot, which can take several
+      # minutes on a cold pip cache. Too short a window marks it unhealthy
+      # before the server has started and aborts the whole stack.
+      start_period: 420s
     networks:
       - airflow
       - default
@@ -148,7 +165,7 @@ services:
       - ./include:/usr/local/airflow/include:ro
     depends_on:
       mlflow:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ['CMD-SHELL', 'curl -fsS http://localhost:8501/_stcore/health || exit 1']
       interval: 30s
@@ -164,6 +181,7 @@ services:
   # A separate database from MLflow's: scenario tables are application state
   # with their own lifecycle, and sharing MLflow's store would couple the two.
   scenario-db:
+    profiles: ['api', 'frontend']
     image: postgres:16-alpine
     platform: linux/arm64
     environment:
@@ -183,13 +201,19 @@ services:
     restart: unless-stopped
 
   # FastAPI serving layer: Scenario Planner endpoints, health, and metrics.
+  #
+  # Profile-gated so `astro dev start` keeps working without building this
+  # image. Start it with:  docker compose --profile api up scenario-api
   scenario-api:
+    profiles: ['api']
     build:
       context: .
       dockerfile: api/Dockerfile
     platform: linux/arm64
     ports:
-      - '8000:8000'
+      # Host port is configurable: 8000 is commonly taken by other local
+      # projects, and a hard mapping makes the whole stack fail to start.
+      - '${SCENARIO_API_PORT:-8008}:8000'
     environment:
       # Service discovery
       - MLFLOW_TRACKING_URI=http://mlflow:5001
@@ -237,7 +261,7 @@ services:
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
     ports:
-      - '3000:3000'
+      - '${FRONTEND_PORT:-3001}:3000'
     environment:
       # Server-side only. The browser never receives backend credentials; it
       # talks to the API through this origin.
