@@ -49,6 +49,10 @@ class ScenarioErrorCode(str, Enum):
     INTERNAL_SCENARIO_ERROR = "INTERNAL_SCENARIO_ERROR"
     # Required by the idempotency contract.
     IDEMPOTENCY_KEY_CONFLICT = "IDEMPOTENCY_KEY_CONFLICT"
+    # Additive: a stored scenario has its own identity, so reporting a missing
+    # or expired comparison as BASELINE_* would misname the resource.
+    SCENARIO_NOT_FOUND = "SCENARIO_NOT_FOUND"
+    SCENARIO_EXPIRED = "SCENARIO_EXPIRED"
 
 
 ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
@@ -68,6 +72,8 @@ ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
     ScenarioErrorCode.SCENARIO_ALREADY_RUNNING: 409,
     ScenarioErrorCode.INTERNAL_SCENARIO_ERROR: 500,
     ScenarioErrorCode.IDEMPOTENCY_KEY_CONFLICT: 409,
+    ScenarioErrorCode.SCENARIO_NOT_FOUND: 404,
+    ScenarioErrorCode.SCENARIO_EXPIRED: 410,
 }
 
 # Service-level codes predate this taxonomy. Mapping them here keeps the
@@ -362,6 +368,20 @@ class IdempotencyKeyConflictError(ScenarioPlannerError):
     )
 
 
+class ScenarioNotFoundError(ScenarioPlannerError):
+    """The referenced scenario comparison does not exist. -> 404"""
+
+    code = ScenarioErrorCode.SCENARIO_NOT_FOUND
+    default_message = "The referenced scenario was not found."
+
+
+class ScenarioExpiredError(ScenarioPlannerError):
+    """The stored comparison can no longer be served. -> 410"""
+
+    code = ScenarioErrorCode.SCENARIO_EXPIRED
+    default_message = "The stored scenario comparison has expired."
+
+
 class InternalScenarioError(ScenarioPlannerError):
     """An unexpected failure. -> 500, with no internal detail disclosed."""
 
@@ -385,6 +405,8 @@ _CODE_TO_CLASS: Dict[ScenarioErrorCode, type] = {
     ScenarioErrorCode.BASELINE_EXPIRED: BaselineExpiredError,
     ScenarioErrorCode.SCENARIO_ALREADY_RUNNING: ScenarioAlreadyRunningError,
     ScenarioErrorCode.IDEMPOTENCY_KEY_CONFLICT: IdempotencyKeyConflictError,
+    ScenarioErrorCode.SCENARIO_NOT_FOUND: ScenarioNotFoundError,
+    ScenarioErrorCode.SCENARIO_EXPIRED: ScenarioExpiredError,
     ScenarioErrorCode.INTERNAL_SCENARIO_ERROR: InternalScenarioError,
 }
 
