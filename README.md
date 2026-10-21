@@ -211,7 +211,6 @@ nests, and `ADMIN` is computed as `frozenset(Permission)` so a newly added
 capability cannot be accidentally missing from it.
 
 ---
-
 ## Architecture
 
 ```
