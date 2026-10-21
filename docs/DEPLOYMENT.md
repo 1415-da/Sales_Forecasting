@@ -23,7 +23,7 @@ it, and keep its data.
 |---|---|
 | Docker Desktop | running, ≥ 8 GB memory allocated |
 | [Astro CLI](https://docs.astronomer.io/astro/cli/install-cli) | `brew install astro` — it drives Airflow and loads `docker-compose.override.yml` automatically |
-| Free ports | 8000, 3000, 8501, 8080, 5001, 9000, 9001 — or override them, see below |
+| Free ports | 8010, 3001, 8501, 8080, 5001, 9000, 9001 |
 
 ---
 
@@ -62,43 +62,33 @@ Airflow sits behind the `airflow` profile, so `docker compose up` starts the
 application stack (api, frontend, scenario-db, mlflow, mlflow-db, minio, redis,
 streamlit) and leaves Airflow alone. Under the profile, `airflow-init` migrates
 the metadata database once and the components wait for it to succeed, the UI is
-published on `AIRFLOW_PORT` (8080 by default, rather than the drifting port the
-Astro CLI assigns), and `AIRFLOW_DB_*`, `AIRFLOW_SECRET_KEY`,
+published on `AIRFLOW_PORT` (8080 by default), and `AIRFLOW_DB_*`, `AIRFLOW_SECRET_KEY`,
 `AIRFLOW_JWT_SECRET`, and `AIRFLOW_FERNET_KEY` configure it.
 
 **Do not run both at once.** They are separate Compose projects, but the
 override publishes 5001, 9000, 9001, and 8501 on fixed host ports, so the
 second stack to start loses those bindings.
 
-### When 3000 or 8000 are already taken
+### Workspace port allocation
 
-The documented ports are overridable because another local project commonly
-owns them. **All four variables move together** — `NEXT_PUBLIC_API_URL` is the
+This workspace reserves `3000` and `8000` for Bite Sense. **All four variables
+move together** — `NEXT_PUBLIC_API_URL` is the
 URL the *browser* calls, so it must match `API_PORT`, and the API rejects any
 origin not in `API_CORS_ALLOW_ORIGINS`, so that must match `FRONTEND_PORT`.
 Changing only one produces a page that loads but cannot fetch:
 
 ```bash
 API_PORT=8010 \
-FRONTEND_PORT=3100 \
+FRONTEND_PORT=3001 \
 NEXT_PUBLIC_API_URL=http://localhost:8010 \
-API_CORS_ALLOW_ORIGINS=http://localhost:3100,http://127.0.0.1:3100 \
+API_CORS_ALLOW_ORIGINS=http://localhost:3001,http://127.0.0.1:3001 \
 astro dev start
 ```
 
 Check what holds a port with `lsof -nP -iTCP:8000 -sTCP:LISTEN`.
 
-> On the current development machine, 3000 and 8000 are held by an unrelated
-> project, so **this stack runs on API `8010` / frontend `3100`** with exactly
-> the overrides above. Every URL in the docs assumes the documented defaults;
-> substitute accordingly.
-
-Airflow's UI port is assigned by the Astro CLI and can drift off 8080. Read the
-real one with:
-
-```bash
-docker port "$(docker ps --format '{{.Names}}' | grep api-server)" 8080
-```
+> Sales Forecasting is configured for **API `8010` / frontend `3001`**. Airflow
+> is consistently available at **`8080`**.
 
 ### Stop
 
@@ -113,10 +103,10 @@ astro dev kill     # removes containers AND volumes — destroys the database
 
 | Service | Container port | Host port | Purpose |
 |---|---|---|---|
-| `frontend` | 3000 | `${FRONTEND_PORT:-3000}` | Next.js web app — the user-facing surface |
-| `api` | 8000 | `${API_PORT:-8000}` | FastAPI: auth, RBAC, inference, monitoring, registry |
+| `frontend` | 3000 | `${FRONTEND_PORT:-3001}` | Next.js web app — the user-facing surface |
+| `api` | 8000 | `${API_PORT:-8010}` | FastAPI: auth, RBAC, inference, monitoring, registry |
 | `streamlit-ui` | 8501 | 8501 | ML Operations Console (an API client only) |
-| `api-server` (Airflow) | 8080 | 8080¹ | Airflow UI — training and monitoring DAGs |
+| `api-server` (Airflow) | 8080 | `${AIRFLOW_PORT:-8080}` | Airflow UI — training and monitoring DAGs |
 | `mlflow` | 5001 | 5001 | tracking server + model registry |
 | `minio` | 9000 | 9000 | S3-compatible artifact store (API) |
 | `minio` console | 9001 | 9001 | MinIO web console |
@@ -126,11 +116,24 @@ astro dev kill     # removes containers AND volumes — destroys the database
 | `minio-mc` | — | — | one-shot bucket provisioner |
 | `scheduler`, `dag-processor`, `triggerer` | — | — | Airflow components |
 
-¹ assigned by the Astro CLI; see above.
-
 The two databases are deliberately separate: scenario, user, audit, and
 monitoring tables are application state with their own lifecycle, and sharing
 MLflow's store would couple the two.
+
+### OrbStack URLs
+
+OrbStack reads the `dev.orbstack.domains` labels in the Compose file and makes
+each browser-facing service available through a stable local HTTPS URL. Visit
+<https://orb.local> once to trust OrbStack's local certificate, then use:
+
+| Service | URL |
+|---|---|
+| Frontend | <https://sales-forecasting.local> |
+| API docs | <https://api.sales-forecasting.local/docs> |
+| Airflow | <https://airflow.sales-forecasting.local> |
+| MLflow | <https://mlflow.sales-forecasting.local> |
+| Streamlit | <https://streamlit.sales-forecasting.local> |
+| MinIO Console | <https://minio.sales-forecasting.local> |
 
 ---
 
@@ -149,10 +152,10 @@ Everything below has a working default in `docker-compose.override.yml`, with
 
 | Variable | Default | Notes |
 |---|---|---|
-| `API_PORT` | `8000` | host port for FastAPI |
-| `FRONTEND_PORT` | `3000` | host port for Next.js |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | the URL the **browser** uses — never a Docker service name |
-| `API_CORS_ALLOW_ORIGINS` | `http://localhost:3000,http://127.0.0.1:3000` | must include the frontend's origin |
+| `API_PORT` | `8010` | host port for FastAPI |
+| `FRONTEND_PORT` | `3001` | host port for Next.js |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8010` | the URL the **browser** uses — never a Docker service name |
+| `API_CORS_ALLOW_ORIGINS` | `http://localhost:3001,http://127.0.0.1:3001` | must include the frontend's origin |
 | `MLFLOW_PUBLIC_URL` | `http://localhost:5001` | browsable MLflow URL for registry run links; distinct from the internal `MLFLOW_TRACKING_URI`, which a browser cannot resolve |
 
 ### Authentication
@@ -429,21 +432,21 @@ destroy the data.
 
 ```bash
 # 1. API is up and reports its dependencies
-curl -s localhost:8000/health | python3 -m json.tool
+curl -s localhost:8010/health | python3 -m json.tool
 
 # 2. A model is serving
-curl -s localhost:8000/v1/models -H "Authorization: Bearer $T" | python3 -m json.tool
+curl -s localhost:8010/v1/models -H "Authorization: Bearer $T" | python3 -m json.tool
 
 # 3. Auth is enforced -- expect 401 NOT_AUTHENTICATED
-curl -s -o /dev/null -w '%{http_code}\n' localhost:8000/v1/models
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8010/v1/models
 
 # 4. RBAC is enforced -- expect 403 PERMISSION_DENIED and an audit row
-curl -s localhost:8000/v1/admin/users -H "Authorization: Bearer $ANALYST_TOKEN"
+curl -s localhost:8010/v1/admin/users -H "Authorization: Bearer $ANALYST_TOKEN"
 
 # 5. Every page serves
 for p in / login register forecast scenario-planner monitoring models \
          admin/users admin/audit-logs settings; do
-  printf '%s %s\n' "$(curl -s -o /dev/null -w '%{http_code}' "localhost:3000/$p")" "$p"
+  printf '%s %s\n' "$(curl -s -o /dev/null -w '%{http_code}' "localhost:3001/$p")" "$p"
 done
 
 # 6. No credential reached the browser bundle
@@ -457,7 +460,7 @@ pytest api/tests tests/api tests/test_dataset_lineage.py -q   # 710 pass
 cd frontend && npx tsc --noEmit && npm test && npm run build   # 278 pass, 11 routes
 
 # live suite -- needs the stack up and an admin password
-LIVE_API_URL=http://localhost:8000 LIVE_ADMIN_PASSWORD=… npm test -- live-api
+LIVE_API_URL=http://localhost:8010 LIVE_ADMIN_PASSWORD=… npm test -- live-api
 ```
 
 ---
@@ -466,7 +469,7 @@ LIVE_API_URL=http://localhost:8000 LIVE_ADMIN_PASSWORD=… npm test -- live-api
 
 | Symptom | Cause and fix |
 |---|---|
-| `Bind for :::8000 failed: port is already allocated` | another project owns the port. Override all four variables together (§ 2). |
+| `Bind for :::8010 failed: port is already allocated` | another project owns the port. Move the API URL, frontend port, and CORS origin together (§ 2). |
 | API exits with `set JWT_SECRET_KEY` | required, no fallback. `echo "JWT_SECRET_KEY=$(openssl rand -base64 48)" >> .env`. |
 | Page loads but every request fails CORS | `API_CORS_ALLOW_ORIGINS` does not list the frontend's origin, or `NEXT_PUBLIC_API_URL` does not match `API_PORT`. All four move together. |
 | Sign-in appears to succeed, then immediately logs out | `COOKIE_SECURE=true` over plain HTTP — the browser drops the refresh cookie. Set `false` for local dev. |

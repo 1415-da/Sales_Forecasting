@@ -84,12 +84,27 @@ astro dev start
 
 | | |
 |---|---|
-| Web app | <http://localhost:3000> |
-| API docs | <http://localhost:8000/docs> |
+| Web app | <http://localhost:3001> |
+| API docs | <http://localhost:8010/docs> |
 | Airflow | <http://localhost:8080> |
 | MLflow | <http://localhost:5001> |
 | Ops console | <http://localhost:8501> |
 | MinIO console | <http://localhost:9001> |
+
+### OrbStack quick links
+
+With OrbStack, the same browser-facing services have stable HTTPS links. Open
+<https://orb.local> once to install/trust OrbStack's local certificate, then
+use these links directly:
+
+| Service | OrbStack URL |
+|---|---|
+| Web app | <https://sales-forecasting.local> |
+| API docs | <https://api.sales-forecasting.local/docs> |
+| Airflow | <https://airflow.sales-forecasting.local> |
+| MLflow | <https://mlflow.sales-forecasting.local> |
+| Ops console | <https://streamlit.sales-forecasting.local> |
+| MinIO console | <https://minio.sales-forecasting.local> |
 
 Without the Astro CLI, plain Compose works too — `docker-compose.yml` is the
 base file the CLI otherwise supplies in memory, with Airflow behind a profile:
@@ -99,14 +114,14 @@ docker compose up -d                    # application stack only
 docker compose --profile airflow up -d  # the whole platform, Astro-free
 ```
 
-**If 3000 or 8000 are taken**, all four variables move together — the browser's
-API URL must match the API's port, and the API's allowed origins must match the
-frontend's port:
+This workspace reserves `3000` and `8000` for Bite Sense. Sales Forecasting
+therefore uses `3001` for the frontend and `8010` for the API; the browser's
+API URL and allowed origins are configured to match:
 
 ```bash
-API_PORT=8010 FRONTEND_PORT=3100 \
+API_PORT=8010 FRONTEND_PORT=3001 \
 NEXT_PUBLIC_API_URL=http://localhost:8010 \
-API_CORS_ALLOW_ORIGINS=http://localhost:3100,http://127.0.0.1:3100 \
+API_CORS_ALLOW_ORIGINS=http://localhost:3001,http://127.0.0.1:3001 \
 astro dev start
 ```
 
@@ -480,7 +495,7 @@ pytest api/tests tests/api tests/test_dataset_lineage.py -q
 cd frontend && npx tsc --noEmit && npm test && npm run build
 
 # Live suite against a running stack -- 10 tests; skips without the password
-LIVE_API_URL=http://localhost:8000 LIVE_ADMIN_PASSWORD=… npm test -- live-api
+LIVE_API_URL=http://localhost:8010 LIVE_ADMIN_PASSWORD=… npm test -- live-api
 ```
 
 The backend suite overrides authentication at the `get_current_user` seam only,
@@ -573,7 +588,7 @@ Honest list, in rough order of how much they matter:
 | **[docs/FORECAST_WORKFLOW.md](docs/FORECAST_WORKFLOW.md)** | the forecast path in depth, including the feature contract |
 | **[docs/SCENARIO_PLANNER.md](docs/SCENARIO_PLANNER.md)** | the scenario engine, overrides, and capability gating |
 
-Interactive API docs: <http://localhost:8000/docs>.
+Interactive API docs: <http://localhost:8010/docs>.
 
 ---
 

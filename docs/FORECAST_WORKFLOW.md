@@ -9,7 +9,7 @@ produces.
 ## 1. The user's path
 
 ```
-Browser (http://localhost:3000/forecast)
+Browser (http://localhost:3001/forecast)
    │
    │  GET /health      → API state + the serving Production model
    │  GET /v1/models   → which version serves each model, with its metrics

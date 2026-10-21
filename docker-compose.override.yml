@@ -28,6 +28,14 @@ services:
   api-server:
     volumes:
       - ./data:/usr/local/airflow/data
+    # Astro normally chooses a random localhost port for Airflow. Publish a
+    # stable host port as well so the UI can always be opened directly from
+    # OrbStack at http://localhost:8080.
+    ports:
+      - '${AIRFLOW_PORT:-8080}:8080'
+    labels:
+      dev.orbstack.domains: 'airflow.sales-forecasting.local@8080'
+      com.sales-forecasting.url: 'https://airflow.sales-forecasting.local'
 
   # MLflow tracking server
   mlflow:
@@ -56,6 +64,9 @@ services:
         --serve-artifacts
     ports:
       - '5001:5001'
+    labels:
+      dev.orbstack.domains: 'mlflow.sales-forecasting.local@5001'
+      com.sales-forecasting.url: 'https://mlflow.sales-forecasting.local'
     environment:
       - AWS_ACCESS_KEY_ID=minioadmin
       - AWS_SECRET_ACCESS_KEY=minioadmin
@@ -114,6 +125,11 @@ services:
     ports:
       - '9000:9000'
       - '9001:9001'
+    labels:
+      # The console is the browser-facing MinIO surface; the S3 API remains
+      # available on localhost:9000 for SDK clients.
+      dev.orbstack.domains: 'minio.sales-forecasting.local@9001'
+      com.sales-forecasting.url: 'https://minio.sales-forecasting.local'
     volumes:
       - minio-data:/data
     healthcheck:
@@ -166,6 +182,9 @@ services:
     command: ['bash', '-lc', 'chmod +x /app/entrypoint.sh && /app/entrypoint.sh']
     ports:
       - '8501:8501'
+    labels:
+      dev.orbstack.domains: 'streamlit.sales-forecasting.local@8501'
+      com.sales-forecasting.url: 'https://streamlit.sales-forecasting.local'
     environment:
       # The ML Operations Console now reaches models through the API only. No
       # MLflow, MinIO, or AWS credentials are provided here, which is what
@@ -238,10 +257,12 @@ services:
       dockerfile: api/Dockerfile
     platform: linux/arm64
     ports:
-      # 8000 is the documented port. It is overridable because it is commonly
-      # taken by another local project, and a hard mapping would make the whole
-      # stack fail to start.
-      - '${API_PORT:-8000}:8000'
+      # The API listens on container port 8000. This workspace publishes it on
+      # 8010 because port 8000 is reserved for the Bite Sense project.
+      - '${API_PORT:-8010}:8000'
+    labels:
+      dev.orbstack.domains: 'api.sales-forecasting.local@8000'
+      com.sales-forecasting.url: 'https://api.sales-forecasting.local/docs'
     environment:
       # Service discovery, by Docker service name.
       - MLFLOW_TRACKING_URI=http://mlflow:5001
@@ -302,7 +323,7 @@ services:
       - FORECAST_MAX_HORIZON_DAYS=${FORECAST_MAX_HORIZON_DAYS:-90}
       - FORECAST_PROFIT_TO_SALES_RATIO=${FORECAST_PROFIT_TO_SALES_RATIO:-0.3}
       # Browser origins allowed to call this API.
-      - API_CORS_ALLOW_ORIGINS=${API_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      - API_CORS_ALLOW_ORIGINS=${API_CORS_ALLOW_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
       # Scenario Planner feature flags
       - SCENARIO_ENABLED_TYPES=${SCENARIO_ENABLED_TYPES:-promotion,traffic,closure,holiday,price,custom}
       - BASELINE_REQUIRE_PRODUCTION_STAGE=${BASELINE_REQUIRE_PRODUCTION_STAGE:-true}
@@ -341,12 +362,15 @@ services:
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
     ports:
-      - '${FRONTEND_PORT:-3000}:3000'
+      - '${FRONTEND_PORT:-3001}:3000'
+    labels:
+      dev.orbstack.domains: 'sales-forecasting.local@3000'
+      com.sales-forecasting.url: 'https://sales-forecasting.local'
     environment:
       # This is the URL the *browser* uses, so it must be reachable from the
       # host, not a Docker service name. It carries no credentials -- the API is
       # the only backend the browser ever talks to.
-      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8010}
       - NODE_ENV=development
     volumes:
       - ./frontend:/app

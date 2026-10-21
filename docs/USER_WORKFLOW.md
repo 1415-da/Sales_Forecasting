@@ -18,10 +18,10 @@ or code access is required for any of them.
 
 ## Signing in
 
-1. Open the app (`http://localhost:3000` by default — `3100` on this machine,
-   see [DEPLOYMENT.md](DEPLOYMENT.md)).
-2. Any route redirects to **`/login`** until you are signed in.
-3. Enter your email and password.
+1. Open the landing page at `http://localhost:3001`.
+2. Select **Sign in to the platform**.
+3. Protected routes redirect to **`/login`** until you are signed in.
+4. Enter your email and password.
 
 If self-registration is disabled — the default — the login page says
 *"Accounts are created by an administrator"* instead of showing a dead sign-up

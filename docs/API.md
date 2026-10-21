@@ -1,8 +1,7 @@
 # API reference
 
-FastAPI, served at `http://localhost:8000` by default (`8010` on this machine —
-see [DEPLOYMENT.md](DEPLOYMENT.md)). Interactive docs at `/docs`, machine
-schema at `/openapi.json`.
+FastAPI, served at `http://localhost:8010` in this workspace. Interactive docs
+are at `/docs`, and the machine schema is at `/openapi.json`.
 
 **Every example below was captured from the running stack.** Nothing here is
 illustrative-only.
