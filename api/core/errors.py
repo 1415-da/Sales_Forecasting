@@ -59,6 +59,26 @@ class ScenarioErrorCode(str, Enum):
     # generic validation code and the UI could not offer specific guidance.
     INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
     FEATURE_MISMATCH = "FEATURE_MISMATCH"
+    # Authentication and authorization. Kept distinct from the validation
+    # codes: "who are you" (401), "you may not" (403), and "that field is
+    # wrong" (422) call for three different things from the client.
+    NOT_AUTHENTICATED = "NOT_AUTHENTICATED"
+    INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
+    TOKEN_EXPIRED = "TOKEN_EXPIRED"
+    TOKEN_INVALID = "TOKEN_INVALID"
+    ACCOUNT_INACTIVE = "ACCOUNT_INACTIVE"
+    ACCOUNT_LOCKED = "ACCOUNT_LOCKED"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    REGISTRATION_DISABLED = "REGISTRATION_DISABLED"
+    EMAIL_ALREADY_REGISTERED = "EMAIL_ALREADY_REGISTERED"
+    WEAK_PASSWORD = "WEAK_PASSWORD"
+    RATE_LIMITED = "RATE_LIMITED"
+    # Resources introduced by the final feature set.
+    USER_NOT_FOUND = "USER_NOT_FOUND"
+    ALERT_NOT_FOUND = "ALERT_NOT_FOUND"
+    MONITORING_DATA_UNAVAILABLE = "MONITORING_DATA_UNAVAILABLE"
+    REGISTRY_OPERATION_FAILED = "REGISTRY_OPERATION_FAILED"
+    INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
 
 
 ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
@@ -82,6 +102,22 @@ ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
     ScenarioErrorCode.SCENARIO_EXPIRED: 410,
     ScenarioErrorCode.INSUFFICIENT_HISTORY: 422,
     ScenarioErrorCode.FEATURE_MISMATCH: 409,
+    ScenarioErrorCode.NOT_AUTHENTICATED: 401,
+    ScenarioErrorCode.INVALID_CREDENTIALS: 401,
+    ScenarioErrorCode.TOKEN_EXPIRED: 401,
+    ScenarioErrorCode.TOKEN_INVALID: 401,
+    ScenarioErrorCode.ACCOUNT_INACTIVE: 403,
+    ScenarioErrorCode.ACCOUNT_LOCKED: 423,
+    ScenarioErrorCode.PERMISSION_DENIED: 403,
+    ScenarioErrorCode.REGISTRATION_DISABLED: 403,
+    ScenarioErrorCode.EMAIL_ALREADY_REGISTERED: 409,
+    ScenarioErrorCode.WEAK_PASSWORD: 422,
+    ScenarioErrorCode.RATE_LIMITED: 429,
+    ScenarioErrorCode.USER_NOT_FOUND: 404,
+    ScenarioErrorCode.ALERT_NOT_FOUND: 404,
+    ScenarioErrorCode.MONITORING_DATA_UNAVAILABLE: 503,
+    ScenarioErrorCode.REGISTRY_OPERATION_FAILED: 502,
+    ScenarioErrorCode.INVALID_STATE_TRANSITION: 409,
 }
 
 # Service-level codes predate this taxonomy. Mapping them here keeps the
@@ -405,6 +441,125 @@ class ScenarioExpiredError(ScenarioPlannerError):
 
     code = ScenarioErrorCode.SCENARIO_EXPIRED
     default_message = "The stored scenario comparison has expired."
+
+
+class NotAuthenticatedError(ScenarioPlannerError):
+    """No usable credential was presented. -> 401"""
+
+    code = ScenarioErrorCode.NOT_AUTHENTICATED
+    default_message = "Authentication is required."
+
+
+class InvalidCredentialsError(ScenarioPlannerError):
+    """
+    The email or password was wrong. -> 401
+
+    Deliberately indistinguishable from "no such user": telling a caller which
+    half was wrong turns the login form into an account-enumeration oracle.
+    """
+
+    code = ScenarioErrorCode.INVALID_CREDENTIALS
+    default_message = "Incorrect email or password."
+
+
+class TokenExpiredError(ScenarioPlannerError):
+    """The token was valid but has expired. -> 401"""
+
+    code = ScenarioErrorCode.TOKEN_EXPIRED
+    default_message = "Your session has expired. Sign in again."
+
+
+class TokenInvalidError(ScenarioPlannerError):
+    """The token could not be verified. -> 401"""
+
+    code = ScenarioErrorCode.TOKEN_INVALID
+    default_message = "The authentication token is not valid."
+
+
+class AccountInactiveError(ScenarioPlannerError):
+    """The account exists but has been deactivated. -> 403"""
+
+    code = ScenarioErrorCode.ACCOUNT_INACTIVE
+    default_message = "This account has been deactivated."
+
+
+class AccountLockedError(ScenarioPlannerError):
+    """Too many failed attempts; the account is temporarily locked. -> 423"""
+
+    code = ScenarioErrorCode.ACCOUNT_LOCKED
+    default_message = "Too many failed sign-in attempts. Try again shortly."
+
+
+class PermissionDeniedError(ScenarioPlannerError):
+    """The caller is authenticated but lacks the capability. -> 403"""
+
+    code = ScenarioErrorCode.PERMISSION_DENIED
+    default_message = "You do not have permission to perform this action."
+
+
+class RegistrationDisabledError(ScenarioPlannerError):
+    """Self-registration is turned off for this deployment. -> 403"""
+
+    code = ScenarioErrorCode.REGISTRATION_DISABLED
+    default_message = (
+        "Self-registration is disabled. Ask an administrator for an account."
+    )
+
+
+class EmailAlreadyRegisteredError(ScenarioPlannerError):
+    """The email is already in use. -> 409"""
+
+    code = ScenarioErrorCode.EMAIL_ALREADY_REGISTERED
+    default_message = "That email address is already registered."
+
+
+class WeakPasswordError(ScenarioPlannerError):
+    """The password does not meet the policy. -> 422"""
+
+    code = ScenarioErrorCode.WEAK_PASSWORD
+    default_message = "The password does not meet the minimum requirements."
+
+
+class RateLimitedError(ScenarioPlannerError):
+    """Too many requests from this caller. -> 429"""
+
+    code = ScenarioErrorCode.RATE_LIMITED
+    default_message = "Too many attempts. Try again shortly."
+
+
+class UserNotFoundError(ScenarioPlannerError):
+    """No such user. -> 404"""
+
+    code = ScenarioErrorCode.USER_NOT_FOUND
+    default_message = "That user was not found."
+
+
+class AlertNotFoundError(ScenarioPlannerError):
+    """No such monitoring alert. -> 404"""
+
+    code = ScenarioErrorCode.ALERT_NOT_FOUND
+    default_message = "That alert was not found."
+
+
+class MonitoringDataUnavailableError(ScenarioPlannerError):
+    """Monitoring storage could not be read. -> 503"""
+
+    code = ScenarioErrorCode.MONITORING_DATA_UNAVAILABLE
+    default_message = "Monitoring data is currently unavailable."
+
+
+class RegistryOperationFailedError(ScenarioPlannerError):
+    """A registry mutation could not be applied upstream. -> 502"""
+
+    code = ScenarioErrorCode.REGISTRY_OPERATION_FAILED
+    default_message = "The model registry operation could not be completed."
+
+
+class InvalidStateTransitionError(ScenarioPlannerError):
+    """The requested transition is not legal from the current state. -> 409"""
+
+    code = ScenarioErrorCode.INVALID_STATE_TRANSITION
+    default_message = "That change is not valid from the current state."
 
 
 class InternalScenarioError(ScenarioPlannerError):

@@ -60,7 +60,15 @@ class FeatureRequirement:
 SCENARIO_FEATURE_REQUIREMENTS: Dict[ScenarioType, FeatureRequirement] = {
     ScenarioType.PROMOTION: FeatureRequirement(
         scenario_type=ScenarioType.PROMOTION,
-        candidates=("is_promotion", "promotion_intensity", "discount_depth"),
+        # `has_promotion` first: it is the name the training pipeline actually
+        # produces, so the common case is matched without falling through the
+        # list. The others remain as aliases a differently-built schema may use.
+        candidates=(
+            "has_promotion",
+            "is_promotion",
+            "promotion_intensity",
+            "discount_depth",
+        ),
         mode=RequirementMode.ANY,
         description="Needs a promotion signal the model was trained on.",
     ),

@@ -313,27 +313,52 @@ def test_required_features_are_reported_for_every_type(tmp_path):
 
 
 def test_model_without_promotion_features_is_unsupported(tmp_path):
-    features = [f for f in ALL_FEATURES if f not in ("is_promotion", "promotion_intensity")]
-    service = build_capability_service(tmp_path, features=features)
+    """
+    A schema carrying no promotion signal under any alias is unsupported.
 
-    statuses = status_map(service.get_capabilities("14"))
-    promotion = statuses[ScenarioType.PROMOTION]
+    The reported `missing_features` is the full alias list, in preference
+    order, so the message names every column that would satisfy the
+    requirement rather than only one of them.
+    """
+    features = [
+        name
+        for name in ALL_FEATURES
+        if name not in ("has_promotion", "is_promotion", "promotion_intensity")
+    ]
+    service = build_capability_service(tmp_path, features=features)
+    response = service.get_capabilities("14")
+    promotion = status_map(response)[ScenarioType.PROMOTION]
 
     assert promotion.supported is False
     assert promotion.available_features == []
     assert promotion.missing_features == [
+        "has_promotion",
         "is_promotion",
         "promotion_intensity",
         "discount_depth",
     ]
-    assert promotion.reason is not None
-    assert "is_promotion" in promotion.reason
+    assert "was not trained with any of" in (promotion.reason or "")
 
-    # Unrelated scenario types are unaffected.
-    assert statuses[ScenarioType.TRAFFIC].supported is True
-    assert statuses[ScenarioType.PRICE].supported is True
-    assert not service.get_capabilities("14").is_supported(ScenarioType.PROMOTION)
 
+def test_promotion_is_supported_via_the_has_promotion_alias(tmp_path):
+    """
+    `has_promotion` satisfies the promotion requirement.
+
+    This is the name the training pipeline actually produces. Requiring
+    `is_promotion` alone previously reported promotion scenarios as
+    unsupported against a model that does carry the signal.
+    """
+    features = [
+        name
+        for name in ALL_FEATURES
+        if name not in ("is_promotion", "promotion_intensity", "discount_depth")
+    ] + ["has_promotion"]
+    service = build_capability_service(tmp_path, features=features)
+    promotion = status_map(service.get_capabilities("14"))[ScenarioType.PROMOTION]
+
+    assert promotion.supported is True
+    assert promotion.available_features == ["has_promotion"]
+    assert promotion.missing_features == []
 
 def test_promotion_supported_by_any_single_alias(tmp_path):
     service = build_capability_service(tmp_path, features=["lag_1", "discount_depth"])

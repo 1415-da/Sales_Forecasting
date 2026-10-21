@@ -55,7 +55,15 @@ PROTECTED_FEATURE_PATTERNS: Tuple[str, ...] = (
     r"_ratio_to_",
 )
 
-PROMOTION_FEATURES = ("is_promotion", "promotion_intensity", "discount_depth")
+#: Aliases for the promotion signal, in preference order. `has_promotion` is
+#: what the training pipeline produces; the rest are names another schema might
+#: legitimately use for the same thing.
+PROMOTION_FLAG_ALIASES = ("has_promotion", "is_promotion", "promotion_flag")
+PROMOTION_FEATURES = (
+    *PROMOTION_FLAG_ALIASES,
+    "promotion_intensity",
+    "discount_depth",
+)
 TRAFFIC_FEATURE = "customer_traffic"
 CLOSURE_FEATURE = "is_closed"
 HOLIDAY_FEATURE = "is_holiday"
@@ -364,8 +372,20 @@ class ScenarioFeatureService:
         """Flag a promotion window and set its intensity / discount depth."""
         self._require_dates(scenario, context)
 
+        # Use whichever promotion-flag alias this model was actually trained
+        # with. Hardcoding one name made a promotion scenario report as
+        # unsupported against a schema that does carry the signal, just under a
+        # different name.
+        flag_feature = next(
+            (
+                alias
+                for alias in PROMOTION_FLAG_ALIASES
+                if alias in context.schema_features
+            ),
+            PROMOTION_FLAG_ALIASES[0],
+        )
         candidates: List[Tuple[str, Any, OverrideType]] = [
-            ("is_promotion", 1, OverrideType.SET_CONSTANT)
+            (flag_feature, 1, OverrideType.SET_CONSTANT)
         ]
         if "promotion_intensity" in context.schema_features:
             candidates.append(

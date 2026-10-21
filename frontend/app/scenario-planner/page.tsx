@@ -7,15 +7,17 @@
  * `POST /v1/scenario/compare`, then render the comparison, a partial-scenario
  * warning, an error state, or the empty state.
  *
- * Wiring note: the store list and the history series are still placeholders.
- * There is no store-directory or history endpoint, and the compare endpoint
- * needs at least 7 days of history, so a run reports a history error until that
- * data source exists.
+ * Store list and history are both real now. Stores come from
+ * `GET /v1/models` -- the identifiers the selected model's encoder actually
+ * recognises, so an option the model would reject is never offered. History
+ * comes from the same seeded demo generator the Forecast Console uses, which
+ * keeps a scenario reproducible and clearly labelled as demo input.
  */
 
 import { useCallback, useMemo, useState } from 'react';
 import { AlertTriangle, Layers, Undo2 } from 'lucide-react';
 
+import { RequireAuth } from '@/components/auth/require-auth';
 import { ModelSupportCard } from '@/components/scenario/model-support-card';
 import { RunScenarioCard } from '@/components/scenario/run-scenario-card';
 import { ScenarioComparisonChartCardSkeleton } from '@/components/scenario/scenario-comparison-chart-card';
@@ -41,6 +43,13 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/components/ui/toast';
+import { useAuth } from '@/hooks/use-auth';
+import { useModels } from '@/hooks/use-models';
+import {
+  RECOMMENDED_HISTORY_DAYS,
+  buildSampleHistory,
+} from '@/lib/sample-history';
+import { NO_PERMISSION_MESSAGE, PERMISSIONS } from '@/lib/rbac';
 import { useScenarioCapabilities } from '@/hooks/use-scenario-capabilities';
 import { useScenarioForecast } from '@/hooks/use-scenario-forecast';
 import { useScenarioForm } from '@/hooks/use-scenario-form';
@@ -96,7 +105,39 @@ function PartialScenarioBanner({
 }
 
 export default function ScenarioPlannerPage() {
-  const [history] = useState<HistoryPoint[]>([]);
+  return (
+    <RequireAuth permission={PERMISSIONS.viewScenario}>
+      <ScenarioPlanner />
+    </RequireAuth>
+  );
+}
+
+function ScenarioPlanner() {
+  const { can } = useAuth();
+  const isPermittedToRun = can(PERMISSIONS.runScenario);
+  const models = useModels();
+
+  // The identifiers the selected model's encoder recognises. Offering anything
+  // else would produce a confident forecast for the wrong store, which the API
+  // refuses anyway.
+  const storeOptions = useMemo(
+    () =>
+      models.stores.length > 0
+        ? models.stores.map((store) => ({ id: store, label: store }))
+        : STORE_OPTIONS,
+    [models.stores],
+  );
+
+  // The same seeded demo series the Forecast Console uses: a scenario a user
+  // shows a colleague should be reproducible, and a random series would not be.
+  const history = useMemo<HistoryPoint[]>(
+    () =>
+      buildSampleHistory(RECOMMENDED_HISTORY_DAYS).map((point) => ({
+        date: point.date,
+        sales: point.sales,
+      })),
+    [],
+  );
   const [modelVersion, setPendingModelVersion] = useState('latest');
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rolledBackIds, setRolledBackIds] = useState<string[]>([]);
@@ -154,7 +195,12 @@ export default function ScenarioPlannerPage() {
 
   const scenarioSupported = isScenarioTypeSupported(form.state.scenarioType);
   const errors = form.visibleErrors;
-  const canRun = form.isValid && scenarioSupported && !forecast.isPending && !isRolledBack;
+  const canRun =
+    isPermittedToRun &&
+    form.isValid &&
+    scenarioSupported &&
+    !forecast.isPending &&
+    !isRolledBack;
 
   const handleRun = useCallback(() => {
     // One key per distinct request: an automatic retry or a double-click
@@ -251,7 +297,7 @@ export default function ScenarioPlannerPage() {
       <div className="flex flex-col gap-5 lg:flex-row lg:items-start">
         <div className="w-full space-y-4 lg:w-[380px] lg:shrink-0">
           <ScenarioContextCard
-            stores={STORE_OPTIONS}
+            stores={storeOptions}
             models={MODEL_OPTIONS}
             storeId={form.state.storeId}
             horizonDays={form.state.horizonDays}
@@ -386,7 +432,7 @@ export default function ScenarioPlannerPage() {
           ) : (
             <ScenarioEmptyState
               isSampleAvailable={false}
-              sampleUnavailableReason="Sample scenarios need a history series, which is not wired up yet."
+              sampleUnavailableReason={undefined}
             />
           )}
         </section>

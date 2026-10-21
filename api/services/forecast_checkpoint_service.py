@@ -25,7 +25,9 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import Date, DateTime, Integer, String, Uuid, create_engine, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import Mapped, Session, mapped_column, sessionmaker
+
+from api.db.base import Base as _Base
 
 from api.schemas.baseline_forecast import (
     BaselineForecastCheckpoint,
@@ -94,8 +96,11 @@ class CheckpointError(Exception):
         )
 
 
-class Base(DeclarativeBase):
-    """Declarative base scoped to the scenario planner's own tables."""
+# The declarative base now lives in `api.db.base` so every table in the
+# application shares one metadata registry (and one Alembic target). It is
+# re-exported here because this module defined the first table and existing
+# code imports `Base` from it.
+Base = _Base
 
 
 class ScenarioBaselineForecast(Base):

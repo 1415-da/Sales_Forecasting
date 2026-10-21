@@ -2,12 +2,26 @@
 # It will be automatically loaded by docker-compose when running astro dev start
 
 services:
+  # The monitoring DAG drives the API over HTTP rather than importing `api.*`:
+  # Airflow 3 pins SQLAlchemy 1.4 while the API's models use the 2.0
+  # declarative API, so an import would fail outright. It therefore needs the
+  # internal API URL and the service-account credentials -- and no database URL
+  # of its own, because it never touches the database directly.
   scheduler:
     volumes:
       - ./data:/usr/local/airflow/data
+    environment:
+      - MONITORING_API_URL=${MONITORING_API_URL:-http://api:8000}
+      - MONITORING_SERVICE_EMAIL=${MONITORING_SERVICE_EMAIL:-monitoring-service@example.com}
+      - MONITORING_SERVICE_PASSWORD=${MONITORING_SERVICE_PASSWORD:-}
+      - MONITORING_WINDOW_DAYS=${MONITORING_WINDOW_DAYS:-28}
+      - MONITORING_ACTUALS_LOOKBACK_DAYS=${MONITORING_ACTUALS_LOOKBACK_DAYS:-14}
+      - MONITORING_SCHEDULE=${MONITORING_SCHEDULE:-@daily}
   dag-processor:
     volumes:
       - ./data:/usr/local/airflow/data
+    environment:
+      - MONITORING_SCHEDULE=${MONITORING_SCHEDULE:-@daily}
   triggerer:
     volumes:
       - ./data:/usr/local/airflow/data
@@ -237,6 +251,47 @@ services:
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - AWS_DEFAULT_REGION=us-east-1
       - SCENARIO_DATABASE_URL=postgresql+psycopg2://${SCENARIO_DB_USER:-scenario}:${SCENARIO_DB_PASSWORD:-scenario}@scenario-db:5432/${SCENARIO_DB_NAME:-scenario}
+      # --- Authentication -------------------------------------------------
+      # REQUIRED. Without it the API cannot sign or verify a token and every
+      # authenticated request fails. There is deliberately no generated
+      # fallback: it would invalidate all sessions on each restart and make two
+      # replicas reject each other's tokens.
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:?set JWT_SECRET_KEY, e.g. `openssl rand -base64 48`}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-45}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - JWT_ISSUER=${JWT_ISSUER:-sales-forecasting-api}
+      - JWT_AUDIENCE=${JWT_AUDIENCE:-sales-forecasting}
+      # Off for plain-HTTP local development; must be true behind HTTPS or the
+      # refresh cookie is sent in the clear.
+      - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
+      # Closed by default: an open sign-up form would let anyone reach the model.
+      - ALLOW_SELF_REGISTRATION=${ALLOW_SELF_REGISTRATION:-false}
+      - SELF_REGISTRATION_ROLE=${SELF_REGISTRATION_ROLE:-VIEWER}
+      - MAX_LOGIN_ATTEMPTS=${MAX_LOGIN_ATTEMPTS:-8}
+      - LOGIN_LOCKOUT_MINUTES=${LOGIN_LOCKOUT_MINUTES:-15}
+      - BCRYPT_ROUNDS=${BCRYPT_ROUNDS:-12}
+      # --- First-run admin bootstrap --------------------------------------
+      # Runs only when the user table is empty. Leave the password unset and a
+      # strong one is generated and written to the API log once.
+      - BOOTSTRAP_ADMIN_EMAIL=${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
+      - BOOTSTRAP_ADMIN_NAME=${BOOTSTRAP_ADMIN_NAME:-Platform Administrator}
+      - BOOTSTRAP_ADMIN_PASSWORD=${BOOTSTRAP_ADMIN_PASSWORD:-}
+      # A browsable MLflow URL for the registry UI's run links. Distinct from
+      # MLFLOW_TRACKING_URI, which is an internal hostname a browser cannot
+      # resolve.
+      - MLFLOW_PUBLIC_URL=${MLFLOW_PUBLIC_URL:-http://localhost:5001}
+      # --- Monitoring -----------------------------------------------------
+      - MONITORING_WINDOW_DAYS=${MONITORING_WINDOW_DAYS:-28}
+      # The API creates this service account at start-up and the Airflow
+      # scheduler signs in with it, so both must see the same value. Unset
+      # means no account is created and the DAG fails with a clear message
+      # rather than silently doing nothing.
+      - MONITORING_SERVICE_EMAIL=${MONITORING_SERVICE_EMAIL:-monitoring-service@example.com}
+      - MONITORING_SERVICE_PASSWORD=${MONITORING_SERVICE_PASSWORD:-}
+      - MONITORING_SERVICE_NAME=${MONITORING_SERVICE_NAME:-Monitoring Service}
+      # Where observed sales are read from, for the actuals ingestion step.
+      - MONITORING_ACTUALS_PATH=${MONITORING_ACTUALS_PATH:-/usr/local/airflow/data/raw/kaggle_m5/v1.0.0/sales}
       # Model resolution
       - MLFLOW_REGISTERED_MODEL_PREFIX=${MLFLOW_REGISTERED_MODEL_PREFIX:-sales_forecast_models_}
       - FORECAST_MODELS=${FORECAST_MODELS:-ensemble,xgboost,lightgbm}

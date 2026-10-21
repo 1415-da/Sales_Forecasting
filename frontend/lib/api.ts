@@ -10,14 +10,62 @@
  * greppable in the server log.
  */
 import {
+  clearAccessToken,
+  getAccessToken,
+  setAccessToken,
+} from '@/lib/auth-store';
+import {
+  accuracyResponseSchema,
+  adminUserListSchema,
+  adminUserSchema,
+  alertListSchema,
+  alertSchema,
+  artifactsResponseSchema,
+  auditLogListSchema,
+  authConfigSchema,
+  createdUserSchema,
+  driftResponseSchema,
+  freshnessSchema,
+  lineageSchema,
+  logoutResponseSchema,
+  monitoringSummarySchema,
+  permissionMatrixSchema,
+  registryActionSchema,
+  resetPasswordSchema,
+  sessionSummarySchema,
+  tokenResponseSchema,
+  userProfileSchema,
+  type AccuracyReport,
+  type AdminUser,
+  type AdminUserList,
+  type AlertList,
+  type AuditLogList,
+  type AuthConfig,
+  type CreatedUser,
+  type DriftReport,
+  type FreshnessReport,
+  type ModelArtifacts,
+  type ModelLineage,
+  type MonitoringAlert,
+  type MonitoringSummary,
+  type PermissionMatrix,
+  type RegistryActionResult,
+  type ResetPasswordResult,
+  type SessionSummary,
+  type TokenResponse,
+  type UserProfile,
+} from '@/lib/types/auth';
+import {
   apiErrorSchema,
   forecastResponseSchema,
   healthSchema,
+  modelComparisonSchema,
   modelDetailSchema,
   modelListSchema,
   type ForecastRequestBody,
   type ForecastResponse,
   type HealthReport,
+  type ModelComparison,
   type ModelDetail,
   type ModelList,
 } from '@/lib/types';
@@ -100,7 +148,7 @@ export function generateRequestId(): string {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST';
+  method?: 'GET' | 'POST' | 'PATCH';
   body?: unknown;
   timeoutMs?: number;
   signal?: AbortSignal;
@@ -127,6 +175,26 @@ export const ERROR_MESSAGES: Record<string, string> = {
   FEATURE_MISMATCH:
     'This model needs inputs that cannot be built from a sales history.',
   SCENARIO_VALIDATION_ERROR: 'Check the highlighted field and try again.',
+  NOT_AUTHENTICATED: 'Please sign in to continue.',
+  INVALID_CREDENTIALS: 'Incorrect email or password.',
+  TOKEN_EXPIRED: 'Your session expired. Please sign in again.',
+  TOKEN_INVALID: 'Your session is no longer valid. Please sign in again.',
+  ACCOUNT_INACTIVE:
+    'This account has been deactivated. Ask an administrator to re-enable it.',
+  ACCOUNT_LOCKED:
+    'Too many failed sign-in attempts. Wait a few minutes and try again.',
+  PERMISSION_DENIED: 'You do not have permission to perform this action.',
+  REGISTRATION_DISABLED:
+    'Self-registration is disabled. Ask an administrator for an account.',
+  EMAIL_ALREADY_REGISTERED: 'That email address is already registered.',
+  WEAK_PASSWORD: 'That password does not meet the requirements.',
+  RATE_LIMITED: 'Too many attempts. Wait a moment and try again.',
+  USER_NOT_FOUND: 'That user no longer exists.',
+  ALERT_NOT_FOUND: 'That alert no longer exists.',
+  MONITORING_DATA_UNAVAILABLE: 'Monitoring data is unavailable right now.',
+  REGISTRY_OPERATION_FAILED:
+    'The model registry rejected the operation. Check MLflow and try again.',
+  INVALID_STATE_TRANSITION: 'That change is not valid from the current state.',
   PREDICTION_FAILED: 'The model could not produce a forecast for this request.',
   DATABASE_UNAVAILABLE: 'A required service is unavailable right now.',
   INTERNAL_SCENARIO_ERROR: 'Something went wrong on the server.',
@@ -152,49 +220,140 @@ export function friendlyMessage(error: unknown): string {
   return 'The request could not be completed.';
 }
 
+/** Hooks the React layer installs so the client can react to session loss. */
+interface AuthHooks {
+  /** Called after every failed refresh, so the app can route to /login. */
+  readonly onSessionLost?: () => void;
+}
+
+let authHooks: AuthHooks = {};
+
+/** Install session-loss handling. Called once by the auth provider. */
+export function configureAuth(hooks: AuthHooks): void {
+  authHooks = hooks;
+}
+
+/**
+ * Paths that must never trigger an automatic refresh.
+ *
+ * `/auth/refresh` would recurse; `/auth/login` returning 401 means the
+ * credentials were wrong, and retrying it after a refresh would both fail
+ * again and hide the real error from the user.
+ */
+const NO_REFRESH_PATHS = ['/auth/refresh', '/auth/login', '/auth/register'];
+
+/**
+ * A single in-flight refresh, shared by every caller.
+ *
+ * Without this, a page that fires five queries on mount and gets five
+ * simultaneous 401s would start five refreshes. Each rotates the token and
+ * revokes the previous one, so four of them would present an
+ * already-rotated token -- which the server correctly treats as replay and
+ * answers by revoking the whole session. The user would be logged out by the
+ * act of loading the page.
+ */
+let refreshInFlight: Promise<boolean> | null = null;
+
+/** Exchange the refresh cookie for a new access token. Returns success. */
+export async function refreshSession(): Promise<boolean> {
+  if (refreshInFlight) return refreshInFlight;
+
+  refreshInFlight = (async () => {
+    try {
+      const response = await fetch(`${apiBaseUrl()}/auth/refresh`, {
+        method: 'POST',
+        headers: { Accept: 'application/json' },
+        // The refresh token is an HttpOnly cookie, so it only travels if
+        // credentials are included.
+        credentials: 'include',
+      });
+      if (!response.ok) return false;
+      const parsed = tokenResponseSchema.safeParse(await response.json());
+      if (!parsed.success) return false;
+      setAccessToken(parsed.data.access_token, parsed.data.expires_in);
+      return true;
+    } catch {
+      return false;
+    } finally {
+      // Cleared in a microtask so concurrent callers awaiting this promise all
+      // observe the same result before a new attempt can start.
+      queueMicrotask(() => {
+        refreshInFlight = null;
+      });
+    }
+  })();
+
+  return refreshInFlight;
+}
+
 async function request<T>(
   path: string,
   schema: { parse: (value: unknown) => T },
   options: RequestOptions = {},
 ): Promise<T> {
-  const { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
-  const requestId = generateRequestId();
+  const attempt = async (): Promise<Response> => {
+    const { method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS } = options;
+    const requestId = generateRequestId();
 
-  // Two abort sources: the caller's signal (component unmount) and the
-  // timeout. They are combined so whichever fires first wins.
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(new DOMException('timeout', 'TimeoutError')), timeoutMs);
-  const onExternalAbort = () => controller.abort();
-  options.signal?.addEventListener('abort', onExternalAbort);
-
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl()}${path}`, {
-      method,
-      headers: {
-        Accept: 'application/json',
-        'X-Request-ID': requestId,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      signal: controller.signal,
-    });
-  } catch (cause) {
-    const aborted = cause instanceof Error && cause.name.includes('Abort');
-    const timedOut =
-      controller.signal.aborted &&
-      (controller.signal.reason as { name?: string } | undefined)?.name === 'TimeoutError';
-    throw new ApiError(
-      timedOut ? 'The request timed out.' : 'The API could not be reached.',
-      {
-        kind: timedOut ? 'timeout' : aborted ? 'timeout' : 'network',
-        requestId,
-        cause,
-      },
+    // Two abort sources: the caller's signal (component unmount) and the
+    // timeout. Combined so whichever fires first wins.
+    const controller = new AbortController();
+    const timer = setTimeout(
+      () => controller.abort(new DOMException('timeout', 'TimeoutError')),
+      timeoutMs,
     );
-  } finally {
-    clearTimeout(timer);
-    options.signal?.removeEventListener('abort', onExternalAbort);
+    const onExternalAbort = () => controller.abort();
+    options.signal?.addEventListener('abort', onExternalAbort);
+
+    const token = getAccessToken();
+
+    try {
+      return await fetch(`${apiBaseUrl()}${path}`, {
+        method,
+        headers: {
+          Accept: 'application/json',
+          'X-Request-ID': requestId,
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        // Always included: the refresh cookie must reach /auth/*, and sending
+        // it elsewhere is harmless since it is scoped to that path.
+        credentials: 'include',
+        signal: controller.signal,
+      });
+    } catch (cause) {
+      const timedOut =
+        controller.signal.aborted &&
+        (controller.signal.reason as { name?: string } | undefined)?.name ===
+          'TimeoutError';
+      const aborted = cause instanceof Error && cause.name.includes('Abort');
+      throw new ApiError(
+        timedOut ? 'The request timed out.' : 'The API could not be reached.',
+        {
+          kind: timedOut || aborted ? 'timeout' : 'network',
+          requestId,
+          cause,
+        },
+      );
+    } finally {
+      clearTimeout(timer);
+      options.signal?.removeEventListener('abort', onExternalAbort);
+    }
+  };
+
+  let response = await attempt();
+
+  // One transparent refresh-and-retry on a 401. Beyond one attempt the session
+  // is genuinely gone and retrying only delays telling the user.
+  if (response.status === 401 && !NO_REFRESH_PATHS.includes(path)) {
+    const refreshed = await refreshSession();
+    if (refreshed) {
+      response = await attempt();
+    } else {
+      clearAccessToken();
+      authHooks.onSessionLost?.();
+    }
   }
 
   const payload: unknown = await response.json().catch(() => undefined);
@@ -203,13 +362,17 @@ async function request<T>(
     const parsed = apiErrorSchema.safeParse(payload);
     if (parsed.success) {
       const { error } = parsed.data;
+      if (response.status === 401 && !NO_REFRESH_PATHS.includes(path)) {
+        clearAccessToken();
+        authHooks.onSessionLost?.();
+      }
       throw new ApiError(error.message, {
         kind: 'http',
         status: response.status,
         code: error.code,
         field: error.field ?? null,
         details: error.details,
-        requestId: error.request_id ?? response.headers.get('X-Request-ID') ?? requestId,
+        requestId: error.request_id ?? response.headers.get('X-Request-ID') ?? undefined,
       });
     }
     // FastAPI's own 422 for a malformed body does not use the envelope.
@@ -217,7 +380,7 @@ async function request<T>(
       kind: 'http',
       status: response.status,
       details: payload,
-      requestId: response.headers.get('X-Request-ID') ?? requestId,
+      requestId: response.headers.get('X-Request-ID') ?? undefined,
     });
   }
 
@@ -227,7 +390,6 @@ async function request<T>(
     throw new ApiError('The API response did not match the expected shape.', {
       kind: 'schema',
       status: response.status,
-      requestId,
       cause,
     });
   }
@@ -268,4 +430,389 @@ export function createForecast(
     timeoutMs: FORECAST_TIMEOUT_MS,
     ...(signal ? { signal } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Authentication
+// ---------------------------------------------------------------------------
+
+/** What the login page needs before anyone has signed in. */
+export function getAuthConfig(signal?: AbortSignal): Promise<AuthConfig> {
+  return request('/auth/config', authConfigSchema, signal ? { signal } : {});
+}
+
+/**
+ * Sign in, storing the access token for subsequent calls.
+ *
+ * The refresh token arrives as an HttpOnly cookie, so nothing about it is
+ * handled here -- which is the point.
+ */
+export async function login(
+  email: string,
+  password: string,
+): Promise<TokenResponse> {
+  const result = await request('/auth/login', tokenResponseSchema, {
+    method: 'POST',
+    body: { email, password },
+  });
+  setAccessToken(result.access_token, result.expires_in);
+  return result;
+}
+
+/** Register and sign in, when self-registration is enabled. */
+export async function register(payload: {
+  email: string;
+  full_name: string;
+  password: string;
+}): Promise<TokenResponse> {
+  const result = await request('/auth/register', tokenResponseSchema, {
+    method: 'POST',
+    body: payload,
+  });
+  setAccessToken(result.access_token, result.expires_in);
+  return result;
+}
+
+/**
+ * Sign out.
+ *
+ * The local token is cleared whatever the server says: a logout that leaves
+ * the client believing it is signed in is worse than one the server did not
+ * record.
+ */
+export async function logout(allSessions = false): Promise<void> {
+  try {
+    await request('/auth/logout', logoutResponseSchema, {
+      method: 'POST',
+      body: { all_sessions: allSessions },
+    });
+  } finally {
+    clearAccessToken();
+  }
+}
+
+/** The signed-in user and the permissions their role grants. */
+export function getCurrentUser(signal?: AbortSignal): Promise<UserProfile> {
+  return request('/auth/me', userProfileSchema, signal ? { signal } : {});
+}
+
+/** Change your own password. Every session is revoked, including this one. */
+export async function changePassword(payload: {
+  current_password: string;
+  new_password: string;
+}): Promise<UserProfile> {
+  const result = await request('/auth/change-password', userProfileSchema, {
+    method: 'POST',
+    body: payload,
+  });
+  clearAccessToken();
+  return result;
+}
+
+/** Live sessions for the signed-in user. */
+export function getSessions(signal?: AbortSignal): Promise<SessionSummary[]> {
+  return request(
+    '/auth/sessions',
+    { parse: (value: unknown) => sessionSummarySchema.array().parse(value) },
+    signal ? { signal } : {},
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Monitoring
+// ---------------------------------------------------------------------------
+
+/** Health summary for the monitoring dashboard. */
+export function getMonitoringSummary(
+  params: { windowDays?: number; modelVersion?: string } = {},
+  signal?: AbortSignal,
+): Promise<MonitoringSummary> {
+  const query = new URLSearchParams();
+  if (params.windowDays) query.set('window_days', String(params.windowDays));
+  if (params.modelVersion) query.set('model_version', params.modelVersion);
+  return request(
+    `/v1/monitoring/summary${query.size ? `?${query}` : ''}`,
+    monitoringSummarySchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Accuracy over the recent window, plus the stored trend series. */
+export function getAccuracy(
+  params: {
+    windowDays?: number;
+    modelVersion?: string;
+    storeId?: string;
+    start?: string;
+    end?: string;
+  } = {},
+  signal?: AbortSignal,
+): Promise<AccuracyReport> {
+  const query = new URLSearchParams();
+  if (params.windowDays) query.set('window_days', String(params.windowDays));
+  if (params.modelVersion) query.set('model_version', params.modelVersion);
+  if (params.storeId) query.set('store_id', params.storeId);
+  if (params.start) query.set('start', params.start);
+  if (params.end) query.set('end', params.end);
+  return request(
+    `/v1/monitoring/accuracy${query.size ? `?${query}` : ''}`,
+    accuracyResponseSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** How current the actuals and forecasts are. */
+export function getDataFreshness(signal?: AbortSignal): Promise<FreshnessReport> {
+  return request(
+    '/v1/monitoring/data-freshness',
+    freshnessSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Per-feature drift. Requires detailed monitoring access. */
+export function getDrift(
+  modelVersion?: string,
+  signal?: AbortSignal,
+): Promise<DriftReport> {
+  const query = modelVersion
+    ? `?model_version=${encodeURIComponent(modelVersion)}`
+    : '';
+  return request(
+    `/v1/monitoring/drift${query}`,
+    driftResponseSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Alerts, newest first. Defaults to those still needing attention. */
+export function getAlerts(
+  params: { status?: string; severity?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AlertList> {
+  const query = new URLSearchParams();
+  if (params.status) query.set('status', params.status);
+  if (params.severity) query.set('severity', params.severity);
+  if (params.limit) query.set('limit', String(params.limit));
+  return request(
+    `/v1/monitoring/alerts${query.size ? `?${query}` : ''}`,
+    alertListSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Mark an alert as seen. */
+export function acknowledgeAlert(alertId: string): Promise<MonitoringAlert> {
+  return request(
+    `/v1/monitoring/alerts/${encodeURIComponent(alertId)}/acknowledge`,
+    alertSchema,
+    { method: 'POST' },
+  );
+}
+
+/** Close an alert, optionally recording what was done. */
+export function resolveAlert(
+  alertId: string,
+  note?: string,
+): Promise<MonitoringAlert> {
+  return request(
+    `/v1/monitoring/alerts/${encodeURIComponent(alertId)}/resolve`,
+    alertSchema,
+    { method: 'POST', body: { note: note ?? null } },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Model registry
+// ---------------------------------------------------------------------------
+
+/** Compare two versions of one model. */
+export function compareModels(
+  params: { versionA: string; versionB: string; model?: string },
+  signal?: AbortSignal,
+): Promise<ModelComparison> {
+  const query = new URLSearchParams({
+    version_a: params.versionA,
+    version_b: params.versionB,
+  });
+  if (params.model) query.set('model', params.model);
+  return request(
+    `/v1/models/compare?${query}`,
+    modelComparisonSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Where a model version came from. */
+export function getModelLineage(
+  version: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<ModelLineage> {
+  const query = model ? `?model=${encodeURIComponent(model)}` : '';
+  return request(
+    `/v1/models/${encodeURIComponent(version)}/lineage${query}`,
+    lineageSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Artifact metadata for a version. No storage paths are exposed. */
+export function getModelArtifacts(
+  version: string,
+  model?: string,
+  signal?: AbortSignal,
+): Promise<ModelArtifacts> {
+  const query = model ? `?model=${encodeURIComponent(model)}` : '';
+  return request(
+    `/v1/models/${encodeURIComponent(version)}/artifacts${query}`,
+    artifactsResponseSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** A registry mutation: promote, archive, or roll back. */
+export function registryAction(
+  action: 'promote' | 'archive' | 'rollback',
+  version: string,
+  payload: { model?: string; reason?: string; archiveExisting?: boolean } = {},
+): Promise<RegistryActionResult> {
+  return request(
+    `/v1/models/${encodeURIComponent(version)}/${action}`,
+    registryActionSchema,
+    {
+      method: 'POST',
+      body: {
+        // Always true from the UI: the confirmation happened in the modal, and
+        // the flag exists so an empty POST cannot change what serves.
+        confirm: true,
+        model: payload.model ?? null,
+        reason: payload.reason ?? null,
+        archive_existing: payload.archiveExisting ?? true,
+      },
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Administration
+// ---------------------------------------------------------------------------
+
+/** A page of user accounts. */
+export function getUsers(
+  params: {
+    role?: string;
+    isActive?: boolean;
+    search?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<AdminUserList> {
+  const query = new URLSearchParams();
+  if (params.role) query.set('role', params.role);
+  if (params.isActive !== undefined) query.set('is_active', String(params.isActive));
+  if (params.search) query.set('search', params.search);
+  if (params.limit) query.set('limit', String(params.limit));
+  if (params.offset) query.set('offset', String(params.offset));
+  return request(
+    `/v1/admin/users${query.size ? `?${query}` : ''}`,
+    adminUserListSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Create an account. Omit the password to have one generated. */
+export function createUser(payload: {
+  email: string;
+  full_name: string;
+  role: string;
+  password?: string;
+  is_active?: boolean;
+}): Promise<CreatedUser> {
+  return request('/v1/admin/users', createdUserSchema, {
+    method: 'POST',
+    body: {
+      email: payload.email,
+      full_name: payload.full_name,
+      role: payload.role,
+      password: payload.password ?? null,
+      is_active: payload.is_active ?? true,
+    },
+  });
+}
+
+/**
+ * Edit an account. Only the supplied fields are applied.
+ *
+ * PATCH rather than POST: a partial update must not blank out the fields it
+ * did not mention, and the verb is what says so.
+ */
+export function updateUser(
+  userId: string,
+  payload: { full_name?: string; role?: string; is_active?: boolean },
+): Promise<AdminUser> {
+  return request(
+    `/v1/admin/users/${encodeURIComponent(userId)}`,
+    adminUserSchema,
+    { method: 'PATCH', body: payload },
+  );
+}
+
+/** Deactivate or reactivate an account. */
+export function setUserActive(
+  userId: string,
+  active: boolean,
+): Promise<AdminUser> {
+  return request(
+    `/v1/admin/users/${encodeURIComponent(userId)}/${active ? 'activate' : 'deactivate'}`,
+    adminUserSchema,
+    { method: 'POST' },
+  );
+}
+
+/** Issue a new temporary password. Returned once; all sessions are revoked. */
+export function resetUserPassword(userId: string): Promise<ResetPasswordResult> {
+  return request(
+    `/v1/admin/users/${encodeURIComponent(userId)}/reset-password`,
+    resetPasswordSchema,
+    { method: 'POST' },
+  );
+}
+
+/** The role and permission matrix the API enforces. */
+export function getPermissionMatrix(
+  signal?: AbortSignal,
+): Promise<PermissionMatrix> {
+  return request(
+    '/v1/admin/permissions',
+    permissionMatrixSchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** A page of audit records. */
+export function getAuditLogs(
+  params: {
+    actions?: string[];
+    userId?: string;
+    outcome?: string;
+    resourceType?: string;
+    limit?: number;
+    offset?: number;
+  } = {},
+  signal?: AbortSignal,
+): Promise<AuditLogList> {
+  const query = new URLSearchParams();
+  for (const action of params.actions ?? []) query.append('action', action);
+  if (params.userId) query.set('user_id', params.userId);
+  if (params.outcome) query.set('outcome', params.outcome);
+  if (params.resourceType) query.set('resource_type', params.resourceType);
+  if (params.limit) query.set('limit', String(params.limit));
+  if (params.offset) query.set('offset', String(params.offset));
+  return request(
+    `/v1/admin/audit-logs${query.size ? `?${query}` : ''}`,
+    auditLogListSchema,
+    signal ? { signal } : {},
+  );
 }

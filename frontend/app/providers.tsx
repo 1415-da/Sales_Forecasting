@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState, type ReactNode } from 'react';
 
 import { ToastProvider } from '@/components/ui/toast';
+import { AuthProvider } from '@/hooks/use-auth';
 import { isAutoRetryableError } from '@/lib/utils/errors';
 
 /**
@@ -32,7 +33,14 @@ export function Providers({ children }: { children: ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ToastProvider>{children}</ToastProvider>
+      {/*
+        AuthProvider sits inside QueryClientProvider: it establishes the
+        session, and every query depends on that having happened. It sits
+        outside ToastProvider so a sign-out can surface a toast.
+      */}
+      <AuthProvider>
+        <ToastProvider>{children}</ToastProvider>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }

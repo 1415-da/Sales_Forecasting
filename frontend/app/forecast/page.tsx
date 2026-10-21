@@ -3,6 +3,7 @@
 import { LineChart, ServerCrash } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 
+import { RequireAuth } from '@/components/auth/require-auth';
 import { ExportButton } from '@/components/forecast/export-button';
 import { ForecastChart } from '@/components/forecast/forecast-chart';
 import {
@@ -17,8 +18,10 @@ import { EmptyState } from '@/components/shared/empty-state';
 import { ErrorState } from '@/components/shared/error-state';
 import { ForecastResultsSkeleton, KpiSkeleton } from '@/components/shared/loading-skeleton';
 import { Button } from '@/components/ui/button';
+import { useAuth } from '@/hooks/use-auth';
 import { useForecast } from '@/hooks/use-forecast';
 import { useModels } from '@/hooks/use-models';
+import { NO_PERMISSION_MESSAGE, PERMISSIONS } from '@/lib/rbac';
 import { MIN_HISTORY_DAYS, validateHistory } from '@/lib/sample-history';
 import type { HistoryPoint, HistorySource } from '@/lib/types';
 
@@ -38,6 +41,17 @@ const INITIAL_CONTROLS: ForecastControlsValue = {
  * store would add indirection without removing anything.
  */
 export default function ForecastPage() {
+  return (
+    <RequireAuth permission={PERMISSIONS.viewForecast}>
+      <ForecastConsole />
+    </RequireAuth>
+  );
+}
+
+function ForecastConsole() {
+  const { can } = useAuth();
+  const canGenerate = can(PERMISSIONS.generateForecast);
+  const canExport = can(PERMISSIONS.exportForecast);
   const models = useModels();
   const forecastRun = useForecast();
 
@@ -63,6 +77,10 @@ export default function ForecastPage() {
   const validation = useMemo(() => validateHistory(history), [history]);
 
   const blockedReason = (() => {
+    // Checked first: a VIEWER should be told their role is the reason, not
+    // sent to load history and only then find out.
+    if (!canGenerate)
+      return `${NO_PERMISSION_MESSAGE} Generating a forecast requires a Business User role or above.`;
     if (models.isLoading) return 'Loading models…';
     if (models.isError) return 'The API is unreachable.';
     if (models.isEmpty) return 'No model has been trained yet.';
@@ -161,9 +179,11 @@ export default function ForecastPage() {
                 <ForecastKpiCards forecast={forecastRun.forecast} />
               ) : null}
 
-              <div className="flex items-center justify-end">
-                <ExportButton forecast={forecastRun.forecast} />
-              </div>
+              {canExport ? (
+                <div className="flex items-center justify-end">
+                  <ExportButton forecast={forecastRun.forecast} />
+                </div>
+              ) : null}
 
               <ForecastChart
                 forecast={forecastRun.forecast}

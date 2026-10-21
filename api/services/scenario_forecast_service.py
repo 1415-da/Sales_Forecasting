@@ -72,6 +72,18 @@ BASELINE_RECOMPUTED_WARNING = (
     "Baseline forecast points are not persisted, so the baseline was recomputed "
     "from its checkpoint under the same baseline_forecast_id."
 )
+#: Fraction of the baseline total below which an impact is treated as
+#: indistinguishable from zero. Floating-point recursion leaves a residue of a
+#: few units on a 40,000-unit total; that is not an effect.
+INERT_IMPACT_THRESHOLD = 0.001
+
+INERT_LEVER_WARNING = (
+    "The scenario changed the model's inputs but barely moved its output. The "
+    "feature it targets was effectively constant in this model's training data, "
+    "so the model has no fitted response to it. Read this as 'this model cannot "
+    "express that lever', not as 'the change would have no business effect'."
+)
+
 UNSUPPORTED_OVERRIDE_WARNING = (
     "Some requested overrides were not applied because the model's feature schema "
     "does not contain them; the scenario is therefore partial."
@@ -456,12 +468,56 @@ class ScenarioForecastService:
             store_id=request.store_id,
             assumptions=request.scenario,
             baseline_reused=baseline.reused,
-            warnings=warnings,
+            warnings=self._with_inertia_warning(
+                warnings=warnings,
+                impact=impact,
+                modified_features=override_result.modified_feature_names,
+            ),
         )
 
     # ------------------------------------------------------------------
     # Steps
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _with_inertia_warning(
+        *,
+        warnings: List[str],
+        impact: Any,
+        modified_features: Sequence[str],
+    ) -> List[str]:
+        """
+        Disclose a scenario that changed inputs but not the output.
+
+        Without this, an inert lever and a genuinely neutral change look
+        identical: both report a difference of 0.00. They mean very different
+        things -- the first says the model has no fitted response to that
+        feature, the second says the model predicts no effect -- and letting a
+        planner read the first as the second would be the most misleading thing
+        this endpoint could do.
+        """
+        if not modified_features:
+            return warnings
+
+        baseline_total = getattr(impact, "total_baseline_forecast", None)
+        difference = getattr(impact, "total_difference", None)
+        if baseline_total in (None, 0) or difference is None:
+            return warnings
+
+        try:
+            relative = abs(float(difference)) / abs(float(baseline_total))
+        except (TypeError, ValueError, ZeroDivisionError):
+            return warnings
+
+        if relative < INERT_IMPACT_THRESHOLD and INERT_LEVER_WARNING not in warnings:
+            logger.info(
+                "Scenario modified %s but moved the total by only %.6f%%; "
+                "disclosing an inert lever",
+                list(modified_features),
+                relative * 100,
+            )
+            return [*warnings, INERT_LEVER_WARNING]
+        return warnings
 
     def _resolve_baseline(
         self, request: ScenarioRequest, warnings: List[str]

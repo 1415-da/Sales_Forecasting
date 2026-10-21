@@ -806,14 +806,25 @@ def test_quantile_comparison_populates_impact_range():
 
 
 def test_unsupported_override_is_reported_with_a_warning():
-    """A model without `is_promotion` yields a partial, clearly-flagged scenario."""
-    features = [name for name in ALL_FEATURES if name != "is_promotion"]
+    """
+    A model with no promotion flag yields a partial, clearly-flagged scenario.
+
+    The excluded set covers every alias: leaving one in would make the model
+    support the override and the scenario would no longer be partial.
+    """
+    features = [
+        name
+        for name in ALL_FEATURES
+        if name not in ("is_promotion", "has_promotion", "promotion_flag")
+    ]
     service = build_forecast_service(features=features)
 
     response = service.create_comparison(build_request())
 
+    # With no alias present, the preferred name is what is reported, so the
+    # message names the column this model would need to support a promotion.
     assert [item.feature_name for item in response.unsupported_overrides] == [
-        "is_promotion"
+        "has_promotion"
     ]
     assert UNSUPPORTED_OVERRIDE_WARNING in response.warnings
     # promotion_intensity still applied, but this model ignores it, so the

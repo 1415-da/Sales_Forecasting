@@ -134,6 +134,30 @@ export const forecastRequestSchema = z.object({
   history: z.array(historyPointSchema).min(1),
 });
 
+export const metricDeltaRowSchema = z.object({
+  metric: z.string(),
+  version_a: z.number().nullable().optional(),
+  version_b: z.number().nullable().optional(),
+  delta: z.number().nullable().optional(),
+  delta_pct: z.number().nullable().optional(),
+  /** "improved", "regressed", "unchanged", or "incomparable". */
+  verdict: z.string(),
+  lower_is_better: z.boolean(),
+});
+
+export const modelComparisonSchema = z.object({
+  success: z.boolean(),
+  model: z.string(),
+  /** The incumbent. */
+  version_a: modelInfoSchema,
+  /** The candidate, so "improved" means the candidate is better. */
+  version_b: modelInfoSchema,
+  metrics: z.array(metricDeltaRowSchema),
+  improved_count: z.number(),
+  regressed_count: z.number(),
+  summary: z.string(),
+});
+
 // ---------------------------------------------------------------------------
 // Health  (api/routers/health.py)
 // ---------------------------------------------------------------------------
@@ -186,6 +210,8 @@ export type ModelMetrics = z.infer<typeof modelMetricsSchema>;
 export type ModelInfo = z.infer<typeof modelInfoSchema>;
 export type ModelList = z.infer<typeof modelListSchema>;
 export type ModelDetail = z.infer<typeof modelDetailSchema>;
+export type MetricDeltaRow = z.infer<typeof metricDeltaRowSchema>;
+export type ModelComparison = z.infer<typeof modelComparisonSchema>;
 export type DailyForecast = z.infer<typeof dailyForecastSchema>;
 export type ForecastSummary = z.infer<typeof forecastSummarySchema>;
 export type ForecastMetadata = z.infer<typeof forecastMetadataSchema>;

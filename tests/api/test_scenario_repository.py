@@ -144,6 +144,10 @@ def test_scenario_forecasts_table_matches_the_specification():
         "expires_at",
         "error_code",
         "error_message",
+        # Attribution, added with authentication: a saved scenario records who
+        # created it, and keeps a readable email after the account is removed.
+        "created_by_id",
+        "created_by_email",
     }
 
     table = ScenarioForecast.__table__

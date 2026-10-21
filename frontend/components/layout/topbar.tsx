@@ -1,21 +1,31 @@
 'use client';
 
-import { Activity } from 'lucide-react';
+import { Activity, ShieldAlert } from 'lucide-react';
+import Link from 'next/link';
 
+import { UserMenu } from '@/components/layout/user-menu';
 import { StatusBadge, healthTone } from '@/components/shared/status-badge';
+import { useAuth } from '@/hooks/use-auth';
 import { useHealth } from '@/hooks/use-models';
 
 /**
- * Backend state, always visible.
+ * Backend state and the current user, always visible.
  *
- * The single most useful thing to show at the top of an ML console: when a
- * forecast fails, the first question is whether the API and the registry are
- * up, and answering it here saves the user from guessing.
+ * API health is the single most useful thing to show at the top of an ML
+ * console: when something fails, the first question is whether the API and the
+ * registry are up, and answering it here saves the user from guessing.
  */
 export function Topbar() {
+  const { isAuthenticated, user } = useAuth();
+  // Only polled once signed in: health requires no auth, but an unauthenticated
+  // visitor has nothing to do with the answer.
   const { data, isLoading, isError } = useHealth();
 
-  const tone = isError ? 'danger' : isLoading ? 'neutral' : healthTone(data?.status ?? '');
+  const tone = isError
+    ? 'danger'
+    : isLoading
+      ? 'neutral'
+      : healthTone(data?.status ?? '');
   const label = isError
     ? 'API unreachable'
     : isLoading
@@ -32,12 +42,21 @@ export function Topbar() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2">
+        {user?.must_change_password ? (
+          <Link href="/settings?change-password=1">
+            <StatusBadge tone="warning" className="cursor-pointer">
+              <ShieldAlert aria-hidden="true" className="mr-1 inline h-3 w-3" />
+              Password change required
+            </StatusBadge>
+          </Link>
+        ) : null}
         {model ? (
           <StatusBadge tone="info">
             {model.model} v{model.version} · {model.stage}
           </StatusBadge>
         ) : null}
         <StatusBadge tone={tone}>{label}</StatusBadge>
+        {isAuthenticated ? <UserMenu /> : null}
       </div>
     </header>
   );

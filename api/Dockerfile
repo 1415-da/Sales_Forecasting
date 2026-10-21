@@ -12,7 +12,6 @@ FROM python:3.12-slim
 # continuation itself, where a `#` is not reliably treated as a comment.)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
     PYTHONPATH=/app:/app/include \
     MODEL_CACHE_DIR=/app/.cache/models
 
@@ -25,11 +24,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Dependencies first, so a code change does not reinstall them.
-# Retries and a long socket timeout because this layer pulls ~250 MB of wheels
-# (pandas, scipy, scikit-learn, mlflow); a single dropped connection otherwise
-# fails the whole build.
+#
+# A BuildKit cache mount rather than `PIP_NO_CACHE_DIR`: this layer pulls
+# ~250 MB of wheels (pandas, scipy, scikit-learn, mlflow), and a single dropped
+# connection used to fail the whole build and re-download everything. With the
+# cache, a retry resumes from what already arrived. The cache lives in the
+# builder, not in the image, so the image size is unaffected.
 COPY api/requirements.txt ./api/requirements.txt
-RUN pip install --retries 10 --timeout 120 -r api/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 10 --timeout 120 -r api/requirements.txt
 
 COPY api ./api
 COPY include ./include

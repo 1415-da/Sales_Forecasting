@@ -73,6 +73,9 @@ def build_frame(
             "sales_lag_7": 480.0 + index,
             "sales_rolling_7_mean": 495.0 + index,
             "is_promotion": 0,
+            # The alias the training pipeline actually produces, so a fixture
+            # can exercise either name.
+            "has_promotion": 0,
             "promotion_intensity": 0.0,
             "discount_depth": 0.0,
             "customer_traffic": 400 + index,
@@ -222,6 +225,26 @@ def test_promotion_applied_override_record_is_complete(service):
     assert override.affected_dates == result.modified_dates
 
 
+def test_promotion_uses_the_has_promotion_alias_when_present(service):
+    """
+    The override targets whichever promotion-flag alias the schema carries.
+
+    The engine previously hardcoded `is_promotion`, so a model trained with
+    `has_promotion` had its promotion override reported as unsupported.
+    """
+    features = [name for name in ALL_FEATURES if name != "is_promotion"] + [
+        "has_promotion"
+    ]
+    frame = build_frame(columns=features)
+
+    result = apply(
+        service, promotion_scenario(), frame=frame, schema=build_schema(features)
+    )
+
+    assert "has_promotion" in result.modified_feature_names
+    assert result.unsupported_overrides == []
+
+
 def test_promotion_falls_back_when_only_one_feature_exists(service):
     features = [name for name in ALL_FEATURES if name != "is_promotion"]
     frame = build_frame(columns=features)
@@ -229,7 +252,11 @@ def test_promotion_falls_back_when_only_one_feature_exists(service):
     result = apply(service, promotion_scenario(), frame=frame, schema=build_schema(features))
 
     assert result.modified_feature_names == ["promotion_intensity", "discount_depth"]
-    assert [item.feature_name for item in result.unsupported_overrides] == ["is_promotion"]
+    # With no alias present, the preferred name is what gets reported as
+    # unsupported, so the message names the column the model would need.
+    assert [item.feature_name for item in result.unsupported_overrides] == [
+        "has_promotion"
+    ]
 
 
 # --------------------------------------------------------------------------

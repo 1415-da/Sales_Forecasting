@@ -98,6 +98,13 @@ class ScenarioForecast(Base):
     error_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # Attribution. `SET NULL` on delete and a denormalised email so a saved
+    # scenario stays readable after the account that created it is removed.
+    created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_by_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
+
     daily_forecasts: Mapped[List["ScenarioDailyForecast"]] = relationship(
         back_populates="scenario",
         cascade="save-update, merge",
@@ -108,6 +115,8 @@ class ScenarioForecast(Base):
     __table_args__ = (
         Index("ix_scenario_forecasts_store_created", "store_id", "created_at"),
         Index("ix_scenario_forecasts_status_expires", "status", "expires_at"),
+        # "my saved scenarios, newest first" -- the saved-scenario list query.
+        Index("ix_scenario_forecasts_creator_created", "created_by_id", "created_at"),
     )
 
     @property

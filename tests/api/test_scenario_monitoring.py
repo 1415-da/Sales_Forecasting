@@ -556,7 +556,21 @@ def test_health_stays_200_even_when_dependencies_are_down(client):
     assert response.json()["status"] in {"ok", "degraded", "unavailable"}
 
 
-def test_readiness_fails_closed_without_a_database(client):
+def test_readiness_fails_closed_without_a_database(client, monkeypatch):
+    """
+    Readiness is 503 when the database is not configured.
+
+    The configuration is removed explicitly rather than relying on the test
+    environment happening to lack it: the suite now provisions a database for
+    the authentication tables, so an implicit precondition would make this pass
+    for the wrong reason.
+    """
+    from api.db.session import DATABASE_URL_ENV_VARS, reset_engine
+
+    for name in DATABASE_URL_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    reset_engine()
+
     response = client.get("/health/ready")
 
     assert response.status_code == 503

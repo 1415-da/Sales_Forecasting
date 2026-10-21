@@ -37,7 +37,7 @@ from __future__ import annotations
 import logging
 import math
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -106,6 +106,14 @@ class Projection:
     series: Any
     policy: Any
     warnings: List[str]
+    #: The feature row fed to the model for each forecast day, in order.
+    #: Exposed so the Scenario Planner can take the baseline's own matrix,
+    #: apply overrides to it, and re-predict -- rather than rebuilding a second
+    #: matrix that might not match what the baseline actually used.
+    feature_rows: List[Dict[str, float]] = field(default_factory=list)
+    #: The feature builder bound to this run's model, so a caller can reuse its
+    #: lag/rolling derivation instead of reimplementing it.
+    builder: Optional[Any] = None
 
 
 @dataclass
@@ -335,6 +343,7 @@ class ForecastService:
         policy = builder.build_policy(series)
         store_code = builder.encode_store(store_id)
 
+        rows: List[Dict[str, float]] = []
         predictions = self._run_recursive(
             builder=builder,
             bundle=bundle,
@@ -343,6 +352,7 @@ class ForecastService:
             policy=policy,
             start_date=series.dates[-1] + timedelta(days=1),
             horizon_days=horizon_days,
+            collect_rows=rows,
         )
         return Projection(
             predictions=predictions,
@@ -350,6 +360,8 @@ class ForecastService:
             series=series,
             policy=policy,
             warnings=warnings,
+            feature_rows=rows,
+            builder=builder,
         )
 
     def _run_recursive(
@@ -362,6 +374,7 @@ class ForecastService:
         policy: Any,
         start_date: date,
         horizon_days: int,
+        collect_rows: Optional[List[Dict[str, float]]] = None,
     ) -> List[Tuple[date, float]]:
         """
         Predict one day at a time, feeding each prediction back as history.
@@ -376,6 +389,8 @@ class ForecastService:
         for step in range(horizon_days):
             target_date = start_date + timedelta(days=step)
             row = builder.build_row(target_date, series, store_code, policy)
+            if collect_rows is not None:
+                collect_rows.append(dict(row))
             frame = builder.to_frame([row])
             try:
                 raw = bundle.model.predict(builder.scale(frame))

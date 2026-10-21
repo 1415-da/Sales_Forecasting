@@ -1,339 +1,99 @@
 # Astro Sales Forecasting MLOps Platform
 
-## Overview
+An end-to-end retail sales forecasting platform: Airflow trains and registers
+models, MLflow versions them, FastAPI serves them, and a Next.js web app gives
+business users forecasts, what-if scenarios, monitoring, and a model registry —
+behind authentication and role-based access control, with every privileged
+action audited.
 
-An MLOps platform for sales forecasting, built on Astronomer (Apache Airflow).
-It trains, registers, and promotes ensemble models, then serves forecasts
-through a FastAPI layer to a Next.js web application — so a user can go from a
-sales history to a forecast with a chart, a confidence band, and a CSV export
-without touching Airflow, MLflow, MinIO, or a notebook.
-
-### 🚀 Key Features
-
-- **Forecast Console**: pick a store, horizon, model, and confidence level;
-  supply demo, uploaded, or manually entered history; get a forecast with an
-  uncertainty band, KPIs, a sortable table, and CSV export
-- **Server-side inference only**: every model load and prediction happens in
-  FastAPI; no client ever receives an MLflow, MinIO, or database credential
-- **Scenario Planner**: predictive what-if comparisons against the baseline
-- **Automated ML pipeline**: orchestration with Astronomer/Airflow
-- **Ensemble modelling**: XGBoost, LightGBM, and a weighted ensemble, tuned
-  with Optuna
-- **Experiment tracking**: MLflow runs, dataset lineage, and a model registry
-  backed by PostgreSQL with artifacts in MinIO
-- **Honest reporting**: every forecast declares how its interval was built and
-  which model inputs had to be reconstructed; see
-  [the caveats](#how-the-forecast-is-built-and-what-it-can-and-cannot-tell-you)
-- **Containerised**: one `astro dev start` brings up the whole stack
-
-## 🏗️ Architecture
-
-### Technology Stack
-
-| Component | Technology                 | Purpose |
-|-----------|----------------------------|---------|  
-| **Orchestration** | Astronomer (Airflow 3.0+)  | Workflow automation and scheduling |
-| **ML Tracking** | MLflow 2.9+                | Experiment tracking and model registry |
-| **Storage** | MinIO                      | S3-compatible artifact storage |
-| **ML Models** | XGBoost, LightGBM, Prophet | Ensemble forecasting |
-| **Visualization** | Matplotlib, Seaborn, Plotly | Model analysis and insights |
-| **Inference UI** | Streamlit                  | Interactive prediction interface |
-| **Serving API** | FastAPI                    | Scenario Planner endpoints, health, metrics |
-| **Scenario UI** | Next.js + Tailwind + shadcn/ui | Scenario Planner frontend |
-| **Containerization** | Docker & Docker Compose    | Environment consistency |
-
-### System architecture
-
-Every model load and every prediction happens inside FastAPI. Neither the
-browser nor the Streamlit console holds an MLflow client, a MinIO client, or an
-object-store credential.
+A user can sign in, pick a store and a horizon, supply history, and get a
+forecast with an uncertainty band and a CSV download **without touching
+Airflow, MLflow, MinIO, a notebook, or any code.**
 
 ```
-┌─ DATA ────────────────────────────────────────────────────────────────────┐
-│  Kaggle M5  ·  local CSV  ·  seeded synthetic                             │
-│  → data/raw/{source}/{version}/  +  dataset_manifest.json (sha256)        │
-└────────────────┬──────────────────────────────────────────────────────────┘
-                 ▼
-┌─ ORCHESTRATION ─ Airflow / Astronomer (:8080) ───────────────────────────┐
-│  extract → validate → train → evaluate → register → promote → report     │
-└────────────────┬──────────────────────────────────────────────────────────┘
-                 ▼
-┌─ TRACKING ───────────────────────────────────────────────────────────────┐
-│  MLflow (:5001) ──backend──► PostgreSQL     ──artifacts──► MinIO (:9000) │
-│  runs · params (dataset lineage) · metrics · registered model versions   │
-└────────────────┬──────────────────────────────────────────────────────────┘
-                 │  registry lookup + artifact download (server-side only)
-                 ▼
-┌─ SERVING ─ FastAPI (:8000) ──────────────────────────────────────────────┐
-│  GET  /v1/models            which version serves each model              │
-│  GET  /v1/models/{version}  metrics · features · dataset lineage         │
-│  POST /v1/forecast          recursive multi-day forecast + interval      │
-│  /v1/scenario/*             predictive what-if (Scenario Planner)        │
-│  /health  /health/ready  /metrics                                        │
-│                                                                           │
-│  model_registry_service → artifact_service → feature_service             │
-│                                   → forecast_service (one pipeline)      │
-└───────┬───────────────────────────────────────────┬──────────────────────┘
-        │ HTTP (JSON only)                          │ HTTP (JSON only)
-        ▼                                           ▼
-┌─ Next.js (:3000) ────────────────┐   ┌─ Streamlit (:8501) ───────────────┐
-│  Forecast Console  (product)     │   │  ML Operations Console (internal) │
-│  Scenario Planner                │   │  model status · dependency probes │
-│  chart · KPIs · table · CSV      │   │  forecast test · request ids      │
-└──────────────────────────────────┘   └───────────────────────────────────┘
+browser ──▶ Next.js ──▶ FastAPI ──▶ MLflow · MinIO · PostgreSQL
+                          ▲
+            Airflow ──────┘  (training @weekly, monitoring @daily)
 ```
 
-## 📈 Forecast Console — the end-to-end workflow
+The browser talks to **one** backend. MLflow, MinIO, PostgreSQL, AWS
+credentials, registry tokens, and model artifact paths are never exposed to it,
+and every model load and every prediction happens inside the FastAPI process.
 
-The product-facing path. A user opens the web app, supplies a sales history,
-and gets a forecast back without touching Airflow, MLflow, MinIO, a notebook,
-or a model file.
+---
 
-1. Open **http://localhost:3000** → the Forecast Console.
-2. The top bar shows API health and the current Production model; the Model
-   selector lists what the registry is actually serving.
-3. Pick a **store**, **horizon** (7 / 14 / 30 / 60 / 90), **model**
-   (Ensemble / XGBoost / LightGBM), **version** (Latest Production or a
-   specific one), and **confidence** (80% or 95%).
-4. Supply **history** one of three ways: one-click **demo data** (seeded, and
-   labelled as demo), a **CSV upload** (`date` + `sales` required), or
-   **manual entry** from a dated template. The preview reports row count, date
-   range, missing days, and anything that blocks the run.
-5. Select **Generate Forecast**.
-6. Read the result: KPI cards, a chart with the confidence band (daily or
-   cumulative), a sortable day-by-day table, and **Download CSV**.
+## Contents
 
-### `POST /v1/forecast`
+- [What it does](#what-it-does)
+- [Quick start](#quick-start)
+- [The web application](#the-web-application)
+- [Roles and permissions](#roles-and-permissions)
+- [Architecture](#architecture)
+- [Forecasting](#forecasting)
+- [Scenario planner](#scenario-planner)
+- [Monitoring](#monitoring)
+- [Model registry](#model-registry)
+- [Authentication and audit](#authentication-and-audit)
+- [ML pipeline](#ml-pipeline)
+- [Measured performance](#measured-performance)
+- [Tests](#tests)
+- [Project layout](#project-layout)
+- [Known limitations](#known-limitations)
+- [Documentation](#documentation)
+- [License](#license)
+
+---
+
+## What it does
+
+| | |
+|---|---|
+| **Forecast Console** | multi-day sales forecasts per store, with an uncertainty band, KPIs, a daily table, and CSV export |
+| **Scenario Planner** | predictive what-if: promotion, traffic, holiday, and custom levers against a checkpointed baseline, with per-day and total impact |
+| **Monitoring** | WAPE/MAE/RMSE/bias/coverage/R² over a rolling window, PSI and KS drift, deduplicated alerts, data freshness, and a retraining recommendation |
+| **Model Registry** | versions, metrics, lineage, artifact metadata, side-by-side comparison, and verified promote / archive / rollback |
+| **Authentication** | JWT access tokens, rotating refresh tokens with replay detection, bcrypt passwords, lockout, first-run admin bootstrap |
+| **RBAC** | 5 roles × 18 capabilities, enforced in the backend and mirrored in the UI |
+| **Audit** | append-only trail of every privileged action **and every denial** |
+| **Training** | Airflow DAG: ingest → features → train XGBoost / LightGBM / ensemble → log to MLflow → register |
+
+### Technology
+
+| Layer | Stack |
+|---|---|
+| Frontend | Next.js 14 (App Router), TypeScript strict, Tailwind, TanStack Query v5, Recharts, Zod |
+| API | FastAPI, Pydantic v2, SQLAlchemy 2.0, Alembic, PyJWT, bcrypt |
+| ML | scikit-learn, XGBoost (`xgboost-cpu`), LightGBM, pandas, NumPy |
+| MLOps | Airflow 3 (Astro CLI), MLflow 2.9.2 (tracking + registry), MinIO (S3) |
+| Data | PostgreSQL 16 ×2 (application, MLflow), Parquet dataset cache |
+| Ops console | Streamlit — an API client with no ML library installed |
+
+---
+
+## Quick start
 
 ```bash
-curl -s http://localhost:8000/v1/forecast \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "store_id": "CA_1",
-    "model": "ensemble",
-    "model_version": "latest",
-    "horizon_days": 7,
-    "confidence_level": 0.95,
-    "history": [
-      {"date": "2026-08-22", "sales": 2980},
-      {"date": "2026-08-23", "sales": 3120}
-    ]
-  }'
+git clone <repo-url> && cd Sales_Forecasting
+cp .env.example .env
+
+# REQUIRED -- the API will not start without a signing key.
+echo "JWT_SECRET_KEY=$(openssl rand -base64 48)" >> .env
+
+astro dev start
 ```
 
-`history` must hold at least `FORECAST_MIN_HISTORY_DAYS` (default 30) days,
-ordered oldest-first with no duplicate dates. Store ids come from
-`GET /v1/models` — they are the ones the selected model's encoder recognises.
+| | |
+|---|---|
+| Web app | <http://localhost:3000> |
+| API docs | <http://localhost:8000/docs> |
+| Airflow | <http://localhost:8080> |
+| MLflow | <http://localhost:5001> |
+| Ops console | <http://localhost:8501> |
+| MinIO console | <http://localhost:9001> |
 
-```json
-{
-  "forecast_id": "fc_9f2c1a7b4e6d8f03",
-  "store_id": "CA_1",
-  "model": "ensemble",
-  "model_version": "1",
-  "model_stage": "Production",
-  "horizon_days": 7,
-  "confidence_level": 0.95,
-  "summary": {
-    "total_forecast_sales": 21402.5,
-    "average_daily_sales": 3057.5,
-    "lower_bound_total": 19654.1,
-    "upper_bound_total": 23150.9
-  },
-  "forecasts": [
-    {"date": "2026-10-22", "predicted_sales": 3005.2,
-     "lower_bound": 2813.0, "upper_bound": 3197.4}
-  ],
-  "metadata": {
-    "history_days": 60,
-    "feature_schema_version": "v1",
-    "feature_count": 51,
-    "uncertainty_method": "residual_normal",
-    "residual_std": 98.08,
-    "imputed_features": ["quantity_sold", "profit", "customer_traffic", "has_promotion"],
-    "run_id": "67a0ca0922af4ea289f76a9a943ecafd",
-    "data_source": "kaggle_m5",
-    "dataset_version": "v1.0.0"
-  },
-  "warnings": ["..."]
-}
-```
-
-### How the forecast is built, and what it can and cannot tell you
-
-**Recursive projection.** Each day's lag and rolling inputs come from the
-observed history extended by the days already predicted. Error therefore
-compounds with horizon, and the interval widens by `sqrt(step)` to say so.
-
-**Uncertainty is constructed, not native.** The trained models are point
-estimators. `metadata.uncertainty_method` reports which method produced the
-band: `residual_normal` (a normal interval around the point forecast using the
-model's own held-out RMSE, the preferred path) or `history_volatility` (a
-fallback approximated from the supplied history's volatility, which describes
-the data rather than the model — and says so in `warnings`).
-
-**Some model inputs cannot be known for a future date, and are reconstructed.**
-In the M5-derived training frame `quantity_sold == sales` and
-`profit == 0.3 × sales` hold exactly, because both are summed from the same
-per-product quantity. For a forecast day they are rebuilt from the most recent
-observed level; `customer_traffic` and `has_promotion` are carried from recent
-history, or held at the value they had throughout training when history does
-not supply them; `is_holiday` is reproduced from the same US public-holiday
-calendar the training pipeline used. Every reconstructed input is listed in
-`metadata.imputed_features`.
-
-**The honest consequence.** Because `quantity_sold` is the training target
-under another name, the model leans heavily on it, so a forecast driven by a
-lag-1 proxy behaves largely as a **level projection** rather than an
-independent prediction of day-to-day movement. The API states this in
-`warnings` on every response and the UI shows it under *How to read this
-forecast*. Removing the leakage from the feature set and retraining is the
-single highest-value next change to this platform.
-
-## 🔮 Scenario Planner
-
-Ask "what if we ran a 7-day promotion?" and get a comparison against the current
-baseline forecast — per day, in total, with uncertainty and full lineage.
-
-> **Scenarios are predictive what-if analyses, not causal guarantees.** A
-> scenario runs the *same* model twice: once on the baseline forecast-time
-> features and once with your assumptions applied. The difference is what the
-> model **associates** with those conditions, based on historical patterns. It
-> does not prove the scenario *causes* the change, and the intervals reflect
-> model error only — not competitor action, supply shocks, or anything outside
-> the training data. Every API response carries these limitations explicitly.
-
-**Scenario types**: promotion · traffic change · store closure · holiday impact ·
-price change · custom feature override.
-
-Each is gated on what the selected model was actually trained on: if a model has
-no `customer_traffic` feature, the traffic scenario is reported unsupported with
-the missing features named, rather than silently returning a meaningless zero.
-
-### Example request
-
-```bash
-curl -X POST http://localhost:8000/v1/scenario/compare \
-  -H 'Content-Type: application/json' \
-  -H 'X-Request-ID: req_demo_001' \
-  -H 'Idempotency-Key: 8f2c4b1e-7a3d-4c5e-9f10-2b6d8e4a1c73' \
-  -d '{
-    "store_id": "CA_1",
-    "model_version": "latest",
-    "horizon_days": 14,
-    "confidence_levels": [0.1, 0.5, 0.9],
-    "history": [
-      {"date": "2026-01-01", "sales": 512.0},
-      {"date": "2026-01-02", "sales": 498.0},
-      {"date": "2026-01-03", "sales": 530.0},
-      {"date": "2026-01-04", "sales": 547.0},
-      {"date": "2026-01-05", "sales": 505.0},
-      {"date": "2026-01-06", "sales": 489.0},
-      {"date": "2026-01-07", "sales": 521.0}
-    ],
-    "scenario": {
-      "scenario_type": "promotion",
-      "start_date": "2026-01-08",
-      "end_date": "2026-01-14",
-      "promotion_intensity": "medium",
-      "discount_depth": 0.25
-    }
-  }'
-```
-
-### Example response (abridged)
-
-```json
-{
-  "scenario_id": "scn_4f8a2c1b9e7d4a3f8c2b1e9d7a4f3c8b",
-  "baseline_forecast_id": "bf_9c3e7a1d5b8f2e6c4a9d3b7f1e5c8a2d",
-  "scenario_forecast_id": "sf_2b6d8e4a1c73f9a5e3c7b1d9f4a8e2c6",
-  "model_version": "14",
-  "model_stage": "Production",
-  "scenario_type": "promotion",
-  "forecast_type": "predictive_what_if",
-  "baseline": { "horizon_days": 14, "total_forecast": 7210.0, "has_quantiles": true },
-  "scenario": { "horizon_days": 14, "total_forecast": 7528.0, "has_quantiles": true },
-  "impact": {
-    "horizon_days": 14,
-    "total_baseline_forecast": 7210.0,
-    "total_scenario_forecast": 7528.0,
-    "total_difference": 318.0,
-    "total_difference_pct": 4.41,
-    "positive_days": 7,
-    "negative_days": 0,
-    "peak_impact_date": "2026-01-11",
-    "peak_impact_value": 62.0,
-    "impact_range": {
-      "total_difference_p10": 180.0,
-      "total_difference_p50": 318.0,
-      "total_difference_p90": 455.0
-    }
-  },
-  "applied_overrides": [
-    { "feature_name": "is_promotion", "override_type": "set_constant", "affected_date_count": 7 }
-  ],
-  "unsupported_overrides": [],
-  "modified_features": ["is_promotion", "discount_depth"],
-  "dataset_lineage": {
-    "data_source": "kaggle_m5",
-    "dataset_version": "v1.0.0",
-    "dataset_hash": "9f2c…",
-    "lineage_status": "partial"
-  },
-  "limitations": [
-    "This is a predictive what-if estimate based on the selected production model.",
-    "It does not establish causal impact.",
-    "Assumes scenario effects resemble historical patterns.",
-    "Uncertainty reflects model error and does not include external shocks."
-  ]
-}
-```
-
-Full reference: **[docs/SCENARIO_PLANNER.md](docs/SCENARIO_PLANNER.md)** —
-workflow, API contract, all error codes, rollback semantics, data lineage,
-limitations, and the causal-upgrade path.
-
-### Current status
-
-`POST /v1/scenario/compare` returns `PREDICTION_FAILED` until two adapters are
-implemented (`FutureFeatureBuilder`, `FeatureMatrixPredictor`) and training
-publishes `feature_schema.json`. Capability discovery, validation, audit,
-rollback, health, and metrics are complete and tested. See
-[Limitations](docs/SCENARIO_PLANNER.md#limitations).
-
-## 🚀 Quick Start
-
-### Prerequisites
-
-- Docker Desktop installed and running, 8 GB+ RAM allocated
-- Astronomer CLI (`brew install astro` on macOS; see the
-  [install guide](https://www.astronomer.io/docs/astro/cli/install-cli/))
-- Free ports: 3000, 8000, 8080, 8501, 5001, 9000, 9001 — or override
-  `API_PORT` / `FRONTEND_PORT` in `.env` (see below)
-
-### 1. Clone and configure
-
-```bash
-git clone https://github.com/1415-da/Sales_Forecasting
-cd Sales_Forecasting
-cp .env.example .env     # optional: every value has a working default
-```
-
-#### If 3000 or 8000 are already taken
-
-Four variables move together — the browser needs a URL it can reach, so
-`NEXT_PUBLIC_API_URL` must match `API_PORT`, and the API must accept the
-frontend's origin:
-
-```bash
-API_PORT=8010
-FRONTEND_PORT=3100
-NEXT_PUBLIC_API_URL=http://localhost:8010
-API_CORS_ALLOW_ORIGINS=http://localhost:3100,http://127.0.0.1:3100
-```
-
-Pass them in the shell rather than putting them in `.env`:
+**If 3000 or 8000 are taken**, all four variables move together — the browser's
+API URL must match the API's port, and the API's allowed origins must match the
+frontend's port:
 
 ```bash
 API_PORT=8010 FRONTEND_PORT=3100 \
@@ -342,283 +102,471 @@ API_CORS_ALLOW_ORIGINS=http://localhost:3100,http://127.0.0.1:3100 \
 astro dev start
 ```
 
-Freeing the ports is simpler if you can. Check what holds them with
-`lsof -nP -iTCP:8000 -sTCP:LISTEN`.
+### First sign-in
 
-### 2. Start the stack
+The first ADMIN is created automatically when the `users` table is empty. Set
+`BOOTSTRAP_ADMIN_PASSWORD` in `.env`, or leave it unset and read the generated
+one from the API log:
 
 ```bash
-astro dev start
+docker logs "$(docker ps --format '{{.Names}}' | grep -- '-api-1')" 2>&1 | grep -i bootstrap
 ```
 
-First start is slow, and all of it is one-off:
+Then sign in, change the password at `/settings`, and create accounts at
+`/admin/users`. Self-registration is **off** by default.
 
-- the `api` image installs its ML stack (~250 MB of wheels) — Compose builds it
-  automatically via `pull_policy: build`, or build it yourself first with
-  `docker compose build api`;
-- the `mlflow` and `streamlit-ui` containers `pip install` at boot (the MLflow
-  healthcheck allows 7 minutes for this, the console 3);
-- `frontend` runs `npm install` into a named volume.
+### Get a model serving
 
-Subsequent starts are fast. Downloaded model artifacts also persist, in the
-`api-model-cache` volume.
+A fresh deployment has no model in Production, and the console says so rather
+than inventing a number. In the Airflow UI, enable and trigger
+**`sales_forecast_training`**, then promote a version from `/models` (or the
+MLflow UI). Enable **`sales_forecast_monitoring`** so accuracy and drift start
+accumulating.
 
-| Service | URL | Notes |
+Full details, every environment variable, and troubleshooting:
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
+
+---
+
+## The web application
+
+11 routes. The sidebar is built from the permission list the **server** returns
+for your account, so you only see what you can use.
+
+| Route | Page | Needs |
 |---|---|---|
-| **Forecast Console** | http://localhost:3000 | the product UI |
-| Scenario Planner | http://localhost:3000/scenario-planner | predictive what-if |
-| **FastAPI docs** | http://localhost:8000/docs | OpenAPI browser |
-| API health | http://localhost:8000/health | api · db · MLflow · MinIO · schema · model |
-| API metrics | http://localhost:8000/metrics | Prometheus text format |
-| ML Operations Console | http://localhost:8501 | internal Streamlit view |
-| Airflow UI | http://localhost:8080 | admin / admin |
-| MLflow UI | http://localhost:5001 | experiments and registry |
-| MinIO Console | http://localhost:9001 | minioadmin / minioadmin |
+| `/` | redirect → `/forecast` | — |
+| `/login` | sign in; states whether sign-up is open | — |
+| `/register` | sign up, when `ALLOW_SELF_REGISTRATION=true` | — |
+| `/forecast` | **Forecast Console** — store, horizon, model, confidence, history, chart + band, KPIs, table, CSV | `view_forecast` / `generate_forecast` |
+| `/scenario-planner` | **Scenario Planner** — levers, baseline vs scenario, per-day impact | `view_scenario` / `run_scenario` |
+| `/monitoring` | **Monitoring** — health, freshness, accuracy, drift, alerts | `view_monitoring` (+`_detail`) |
+| `/models` | **Model Registry** — versions, metrics, lineage, compare, promote/archive/rollback | `view_model_registry` (+ mutations) |
+| `/admin/users` | **Users** — create, edit, roles, activate/deactivate, reset password | `manage_users` |
+| `/admin/audit-logs` | **Audit Log** — filterable, append-only, includes denials | `view_audit_logs` |
+| `/settings` | profile, your exact permission list, change password, sessions | — |
 
-### 3. Train and promote a model
+Hiding a control is presentation only: the API enforces the same matrix, so
+calling a forbidden endpoint with a valid token returns `403` **and writes a
+denial to the audit log**.
 
-```bash
-# In the Airflow UI at http://localhost:8080
-# 1. Enable the `sales_forecast_training` DAG
-# 2. Trigger it
-```
+Per-role walkthroughs: **[docs/USER_WORKFLOW.md](docs/USER_WORKFLOW.md)**.
 
-The DAG runs `extract → validate → train → evaluate → register → promote →
-report → cleanup`. It registers `sales_forecast_models_{xgboost,lightgbm,
-ensemble}` and promotes them to the **Production** stage. Until a Production
-version exists, the Forecast Console says so and the Generate button stays
-disabled — it never invents a forecast.
+---
 
-### 4. Generate a forecast
+## Roles and permissions
 
-```bash
-curl -s http://localhost:8000/v1/models | python3 -m json.tool
-```
+| Capability | ADMIN | ML_ENGINEER | ANALYST | BUSINESS_USER | VIEWER |
+|---|:--:|:--:|:--:|:--:|:--:|
+| `view_forecast` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `generate_forecast` | ✅ | ✅ | ✅ | ✅ | — |
+| `export_forecast` | ✅ | ✅ | ✅ | ✅ | — |
+| `run_scenario` | ✅ | ✅ | ✅ | ✅ | — |
+| `view_scenario` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `view_model_performance` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `view_model_registry` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `view_model_registry_detail` | ✅ | ✅ | ✅ | — | — |
+| `promote_model` | ✅ | ✅ | — | — | — |
+| `archive_model` | ✅ | ✅ | — | — | — |
+| `rollback_model` | ✅ | ✅ | — | — | — |
+| `trigger_retraining` | ✅ | ✅ | — | — | — |
+| `view_monitoring` | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `view_monitoring_detail` | ✅ | ✅ | ✅ | — | — |
+| `manage_alerts` | ✅ | ✅ | — | — | — |
+| `manage_users` | ✅ | — | — | — | — |
+| `view_audit_logs` | ✅ | ✅ | — | — | — |
+| `view_all_audit_logs` | ✅ | — | — | — | — |
 
-Then open **http://localhost:3000**, load the demo history, and select
-**Generate Forecast**. See
-[Forecast Console](#-forecast-console--the-end-to-end-workflow) for the full
-walkthrough.
+Defined once in [`api/core/rbac.py`](api/core/rbac.py), served live at
+`GET /v1/admin/permissions`, and rendered on `/settings` — so this table and
+the enforced rules cannot drift. Role sets are built by union so privilege
+nests, and `ADMIN` is computed as `frozenset(Permission)` so a newly added
+capability cannot be accidentally missing from it.
 
-### Environment variables
+---
 
-Full list with comments in [`.env.example`](.env.example). The ones that matter
-most:
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `API_PORT` | `8000` | host port for FastAPI |
-| `FRONTEND_PORT` | `3000` | host port for Next.js |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8000` | API URL the **browser** uses |
-| `API_CORS_ALLOW_ORIGINS` | `http://localhost:3000,...` | browser origins allowed to call the API |
-| `MLFLOW_REGISTERED_MODEL_PREFIX` | `sales_forecast_models_` | registry naming |
-| `FORECAST_MODELS` | `ensemble,xgboost,lightgbm` | models offered |
-| `FORECAST_DEFAULT_MODEL` | `ensemble` | preselected model |
-| `FORECAST_REQUIRE_PRODUCTION_STAGE` | `true` | refuse to serve an unpromoted version |
-| `FORECAST_MIN_HISTORY_DAYS` | `30` | minimum history accepted |
-| `FORECAST_MAX_HORIZON_DAYS` | `90` | maximum horizon |
-| `FORECAST_PROFIT_TO_SALES_RATIO` | `0.3` | ratio used to rebuild `profit` |
-| `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | `minioadmin` | **local defaults — change anywhere real** |
-
-Credentials reach the API and MLflow only. The frontend receives
-`NEXT_PUBLIC_API_URL` and nothing else.
-
-### Tests
-
-```bash
-# Backend: 574 tests (services, routes, error contract, scenario planner)
-python3 -m pytest api/tests tests/api tests/test_dataset_lineage.py -q
-
-# Frontend: 241 tests + strict typecheck
-cd frontend && npm test && npm run typecheck
-```
-
-## 📊 ML Pipeline Features
-
-### Data Processing
-- **Pluggable, versioned training data** — default **`kaggle_m5`** via [kagglehub](https://github.com/Kaggle/kagglehub) (`m5-forecasting-accuracy`); see `data/README.md`
-- **Deterministic synthetic benchmark** (`random_seed`, `dataset_version`, content hash → MLflow)
-- Cached parquet under `data/raw/{source}/{version}/` (no delete-on-cleanup)
-- Time-based train/validation/test splitting
-- Comprehensive data validation and quality checks
-- Advanced feature engineering (lags, rolling stats, seasonality)
-
-### Model Training
-- **XGBoost**: Gradient boosting for non-linear patterns
-- **LightGBM**: Fast training with categorical support
-- **Ensemble**: Optimized weighted average of all models
-- Hyperparameter tuning with Optuna
-
-### Visualization Suite
-- Model performance comparison charts
-- Time series predictions with confidence intervals
-- Residual analysis and diagnostics
-- Feature importance rankings
-- Interactive plots with Plotly
-
-### Model Management
-- Automated experiment tracking with MLflow
-- Model versioning and registry
-- Artifact storage in MinIO
-- Production model promotion workflow
-
-## 🎯 Serving layer
-
-All inference lives in `api/`. One pipeline serves the Forecast Console, the
-Streamlit console, and the Scenario Planner's baseline leg, so the same inputs
-produce the same number everywhere.
+## Architecture
 
 ```
-POST /v1/forecast
-  └─ model_registry_service   which version serves (registry, read-only)
-     └─ artifact_service      download + cache model, scaler, encoder, features
-        └─ feature_service    calendar · cyclical · lag · rolling · exogenous
-           └─ forecast_service  recursive projection + uncertainty band
+                         ┌──────────────────────────────┐
+  browser  ──────────────▶  Next.js 14  (frontend/)     │   3000
+                         │  access token in memory      │
+                         │  refresh cookie → /auth      │
+                         └───────────────┬──────────────┘
+                                         │  the ONLY backend the browser calls
+                         ┌───────────────▼──────────────┐
+  Streamlit ────────────▶│  FastAPI  (api/)             │   8000
+  ops console  8501      │  auth · RBAC · audit         │
+  (API client; no ML     │  features · inference        │
+  library installed)     │  monitoring · scenarios      │
+                         └──┬────────┬────────┬─────────┘
+            ┌───────────────▼┐  ┌────▼─────┐ ┌▼──────────────┐
+            │ PostgreSQL     │  │ MLflow   │ │ MinIO (S3)    │
+            │ 13 tables      │  │ 5001     │ │ 9000 / 9001   │
+            └───────▲────────┘  └────▲─────┘ └───▲───────────┘
+            ┌───────┴────────────────┴───────────┴───────────┐
+            │ Airflow 3   sales_forecast_training   @weekly  │ 8080
+            │             sales_forecast_monitoring @daily   │
+            └────────────────────────────────────────────────┘
 ```
 
-| Module | Responsibility |
-|---|---|
-| `api/config.py` | all environment reads, in one frozen `Settings` |
-| `api/deps.py` | service lifetimes, so routes are overridable in tests |
-| `api/services/model_registry_service.py` | registry lookups; metrics and lineage |
-| `api/services/artifact_service.py` | artifact fetch (proxy transport) + LRU cache |
-| `api/services/feature_service.py` | the canonical feature contract |
-| `api/services/forecast_service.py` | recursion, uncertainty, model discovery |
-| `api/routers/{forecast,models,health}.py` | thin HTTP layer |
-| `api/core/errors.py` | one error taxonomy and one response envelope |
+Inside the API: `routers/` (HTTP only) → `services/` (all logic, no FastAPI
+imports) → `db/repositories/` (queries; never own a transaction) →
+`db/models/` (SQLAlchemy 2.0). `core/` holds RBAC, security, and the error
+contract with no I/O.
 
-### Endpoints
+Two constraints shaped the design and are worth knowing before changing
+anything:
 
-| Method | Path | Returns |
-|---|---|---|
-| `GET` | `/health` | API, database, MLflow, MinIO, feature schema, Production model |
-| `GET` | `/health/ready` | 503 when a critical dependency is down |
-| `GET` | `/metrics` | Prometheus text exposition |
-| `GET` | `/v1/models` | serving version per model, with metrics and stores |
-| `GET` | `/v1/models/{version}` | one version: metrics, feature list, lineage |
-| `POST` | `/v1/forecast` | multi-day forecast, summary, metadata, warnings |
-| `*` | `/v1/scenario/*` | Scenario Planner (see above) |
+- **The monitoring DAG speaks HTTP, not Python.** Airflow 3 pins SQLAlchemy 1.4
+  while the API's models need 2.0, so importing `api.db` in a DAG fails
+  outright. `dags/sales_forecast_monitoring.py` uses only `urllib`: it signs in
+  as a service account and calls `POST /v1/monitoring/evaluate`. The scheduler
+  therefore holds no database URL and no object-store credential.
+- **MLflow 2.9.2 server vs 3.x client.** `search_registered_models()` returns
+  `[]` across that split, so the registry service enumerates the configured
+  model names instead. Artifacts are fetched through MLflow's `/get-artifact`
+  proxy, which also means the inference path needs no object-store credential.
 
-Every failure uses one envelope:
+Full detail: **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**.
+
+---
+
+## Forecasting
+
+`POST /v1/forecast` → resolve the Production version → load the artifact
+(proxy + disk cache) → validate the history → walk the horizon recursively,
+rebuilding calendar, lag, and rolling features from the path so far → derive an
+uncertainty band → persist the forecast so monitoring can score it later.
 
 ```json
 {
-  "success": false,
-  "error": {
-    "code": "INSUFFICIENT_HISTORY",
-    "message": "At least 30 days of history are required; 10 were supplied.",
-    "field": "history",
-    "details": {"required_days": 30, "supplied_days": 10},
-    "request_id": "req_4f1c...",
-    "timestamp": "2026-10-21T09:30:00Z"
-  }
+  "store_id": "CA_1", "model": "ensemble",
+  "horizon_days": 7, "confidence_level": 0.95,
+  "history": [{ "date": "2016-01-01", "sales": 2620.0 }, "… ≥ 30 days"]
 }
 ```
 
-| Code | Status | Meaning |
-|---|---|---|
-| `INSUFFICIENT_HISTORY` | 422 | fewer days than the model's windows need |
-| `SCENARIO_VALIDATION_ERROR` | 422 | a field is unusable (e.g. an unknown store) |
-| `MODEL_NOT_FOUND` | 404 | unknown model or version |
-| `MODEL_NOT_IN_PRODUCTION` | 409 | the version exists but is not promoted |
-| `FEATURE_MISMATCH` | 409 | the model needs inputs a sales history cannot provide |
-| `ARTIFACT_DOWNLOAD_FAILED` | 502 | the artifact could not be retrieved |
-| `PREDICTION_FAILED` | 500 | the model failed during inference |
-| `MLFLOW_UNAVAILABLE` | 503 | the registry could not be reached |
-
-No stack trace, filesystem path, connection string, object-store key, or
-internal hostname ever appears in a response: everything client-facing passes
-through `sanitize_text` / `sanitize_details`. The `request_id` is echoed as
-`X-Request-ID` and shown in both UIs so a user can quote one greppable
-identifier.
-
-### Web application (`frontend/`)
-
-Next.js App Router, TypeScript strict, Tailwind, shadcn-compatible primitives,
-TanStack Query, Recharts, Zod. Every API response is parsed with Zod before it
-renders, so a shape change fails with one legible error instead of putting
-`undefined` into a chart.
-
-| Path | Contents |
-|---|---|
-| `app/forecast/page.tsx` | the Forecast Console |
-| `app/scenario-planner/page.tsx` | the Scenario Planner |
-| `components/forecast/` | controls, history input, KPIs, chart, table, export, notes |
-| `components/layout/` | app shell, sidebar, topbar (live health) |
-| `components/shared/` | metric card, status badge, empty / error / loading states |
-| `lib/api.ts` | the typed client and the `ApiError` taxonomy |
-| `lib/types.ts` | Zod schemas mirroring `api/schemas/` |
-| `lib/sample-history.ts` | demo generator, CSV parser, history validation |
-
-### ML Operations Console (`ui/`, Streamlit)
-
-An internal operator view, kept deliberately distinct from the product UI: it
-shows dependency probes, request ids, and raw response bodies. It loads no
-model — the image installs no ML library and receives no object-store
-credential, so direct artifact access is structurally impossible rather than
-merely discouraged.
-
-## 📈 Measured performance
-
-From the latest training run (`67a0ca0922af`, 365 daily files → 3,650
-store-days, 51 features, chronological 2555/365/730 split):
-
-| Model | RMSE | MAE | R² | WAPE | MAPE |
-|---|---|---|---|---|---|
-| XGBoost | 82.96 | 31.57 | 0.995 | 1.12% | 153.6 |
-| Ensemble | 98.08 | 29.64 | 0.993 | 1.05% | 202.0 |
-| LightGBM | 118.56 | 32.21 | 0.990 | 1.14% | 250.7 |
-
-**Read these with the caveat above.** `quantity_sold` in the training frame is
-the target under another name, so the headline R² and WAPE largely measure that
-identity rather than forecasting skill. MAPE is large because it is computed
-only over non-zero actuals on a series containing many near-zero store-days —
-which is why WAPE and bias are logged alongside it. Fixing the leakage and
-retraining is required before these numbers mean what they appear to mean.
-
-Pipeline timings on an 8 GB Docker allocation: training ~20–30 min with Optuna
-(50 trials per model); forecast latency ~0.3–2 s for a 7–90 day horizon
-(recursive, one model call per day); the first forecast after a restart adds a
-one-off artifact download.
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-| Symptom | Cause and fix |
-|---|---|
-| Services will not start | Docker memory below 8 GB; raise it in Docker Desktop |
-| `container ... mlflow-1 is unhealthy` on start | MLflow `pip install`s at boot and can take minutes. The healthcheck allows 7 minutes (`start_period: 420s`); on a slow connection, wait and retry |
-| Port already allocated | Another project owns 3000 or 8000. See [If 3000 or 8000 are already taken](#if-3000-or-8000-are-already-taken) |
-| `No such image: ...-api:latest` | The API image has not been built. `docker compose build api`, then start again. (`pull_policy: build` normally handles this; the explicit `image:` tag keeps the name stable so the build is found.) |
-| `streamlit-ui` reports unhealthy while the page loads fine | Was a probe bug — the healthcheck called `curl`, which `python:3.11-slim` does not ship. Fixed; if you see it again, check `docker inspect --format '{{json .State.Health}}'` for the probe's own output |
-| Console says "No Production model available" | The DAG has not run, or promotion failed. Check `transition_to_production_task` in the Airflow UI, then `curl localhost:8000/v1/models` |
-| Forecast fails with `INSUFFICIENT_HISTORY` | Fewer than `FORECAST_MIN_HISTORY_DAYS` (30) days supplied |
-| Forecast fails with `ARTIFACT_DOWNLOAD_FAILED` | MinIO or the MLflow artifact proxy is unreachable; check `curl localhost:8000/health` |
-| Browser shows a network error, API works via curl | CORS. The frontend origin must be listed in `API_CORS_ALLOW_ORIGINS` |
-| `GET /v1/models` returns an empty list | Expected before the first training run. It is a 200 with a warning, not an error |
-
-### Logs and debugging
-
-```bash
-astro dev logs                                   # Airflow
-docker compose logs -f api                       # FastAPI (structured JSON)
-docker compose logs -f mlflow streamlit-ui frontend
-
-curl -s localhost:8000/health | python3 -m json.tool   # every dependency
-curl -s localhost:8000/v1/models | python3 -m json.tool
+```json
+{
+  "summary": { "total_forecast_sales": 21650.87, "average_daily_sales": 3092.98,
+               "lower_bound_total": 19060.15, "upper_bound_total": 24241.6 },
+  "forecasts": [{ "date": "2016-02-15", "predicted_sales": 3094.89,
+                  "lower_bound": 2902.66, "upper_bound": 3287.11 }],
+  "metadata": { "uncertainty_method": "residual_normal", "residual_std": 98.0759,
+                "imputed_features": ["quantity_sold", "profit", "customer_traffic", "has_promotion"],
+                "feature_count": 51, "run_id": "67a0ca09…", "dataset_version": "v1.0.0" },
+  "warnings": ["…"]
+}
 ```
 
-Every API response carries an `X-Request-ID`, and both UIs display it. Grep the
-API log for that id to find the matching server-side entry.
+### The feature contract, and why the request looks sparse
 
-## 📚 Documentation
+You are not asked for `is_holiday`, `customer_traffic`, `quantity_sold`, or
+`profit`. One module —
+[`api/services/feature_service.py`](api/services/feature_service.py) — owns the
+contract for forecasting, scenarios, and monitoring alike, and it **reproduces
+the training policy** rather than inventing a serving-time one:
 
-- [Forecast workflow](docs/FORECAST_WORKFLOW.md) — the end-to-end path, API contract, and limitations
-- [Scenario Planner](docs/SCENARIO_PLANNER.md) — workflow, API contract, error codes, limitations
-- [Training data sources](data/README.md) — pluggable providers and dataset versioning
-- [Astronomer Docs](https://www.astronomer.io/docs/)
+- `quantity_sold` and `profit` are same-day leaked columns, reconstructed from
+  the predicted value;
+- `customer_traffic` and `has_promotion` were effectively constant in training,
+  so serving supplies the same values — feeding "realistic" ones would push the
+  model out of distribution;
+- `is_holiday` is computed from `holidays.US()`.
 
-## 📄 License
+Matching training is what removed the clipped calibration hack earlier versions
+needed: a history averaging 2 977 now yields xgboost 3 058 / lightgbm 3 085 /
+ensemble 3 067, with no post-hoc correction.
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Every response carries `metadata` and `warnings[]`, so a caller is told what was
+assumed instead of guessing. The band is `z × residual_std × √step`, which is
+why it widens across the horizon — later days are forecast from earlier
+forecasts.
+
+---
+
+## Scenario planner
+
+`POST /v1/scenario/compare` checkpoints a **baseline** forecast, applies the
+levers to the future exogenous matrix, and re-walks the horizon with a
+predictor that recomputes lag and rolling columns from its own evolving path —
+which is what makes a multi-day scenario **compound** rather than apply a flat
+daily offset.
+
+Two behaviours matter more than the feature list:
+
+**Unsupported levers are refused, not approximated.** `closure` and `price` have
+no corresponding feature in the current model:
+
+```json
+{ "code": "SCENARIO_NOT_SUPPORTED",
+  "message": "Model version latest was not trained with any of: is_closed, store_event.",
+  "details": { "missing_features": ["is_closed", "store_event"],
+               "supported_scenario_types": ["promotion", "traffic", "holiday", "custom"] } }
+```
+
+**Inert levers are disclosed, not dressed up.** A live 7-day high-intensity
+promotion over a 14-day horizon moves the total by **−0.38 units (−0.0009%)**,
+and the response says why:
+
+> *The scenario changed the model's inputs but barely moved its output. The
+> feature it targets was effectively constant in this model's training data, so
+> the model has no fitted response to it. Read this as 'this model cannot
+> express that lever', not as 'the change would have no business effect'.*
+
+Partial application is reported too: `applied_overrides` lists what was set
+(`has_promotion` → 1 across 7 dates, with before/after value summaries), and
+`unsupported_overrides` lists what the schema has no column for
+(`discount_depth`), with a reason. Nothing is silently dropped, and no uplift
+coefficient is invented to make the number look useful.
+
+---
+
+## Monitoring
+
+```
+Airflow @daily ─ urllib only ─▶ POST /v1/monitoring/evaluate
+                                  ingest actuals → join forecasts ↔ actuals
+                                  → accuracy → drift → alerts
+```
+
+**Accuracy.** WAPE is the headline because MAPE explodes on this dataset's
+zero-sales days (it is still reported, masked to non-zero actuals). Also MAE,
+RMSE, signed bias, **interval coverage**, and R², with a window-over-window
+trend.
+
+**Drift.** PSI and two-sample KS, thresholds 0.10/0.25 and 0.10/0.20, no
+verdict below 20 samples. What is measured is **prediction** drift
+(`forecast_error`, `predicted_sales`, `actual_sales`), not input-feature drift,
+and the API says so rather than implying more.
+
+**Alerts** are fingerprint-deduplicated — the fingerprint deliberately excludes
+the measured value, so a persistent breach updates one alert
+(`occurrence_count`) instead of raising a new one daily.
+
+**Nothing is fabricated.** With no scored window the response is explicit:
+
+> *Monitoring will populate after forecasts and actual outcomes are recorded.*
+
+And when drift exists but accuracy cannot be measured, the retraining
+recommendation is `investigate` rather than `no_data` — otherwise a drifting
+model with stale actuals would look healthy.
+
+---
+
+## Model registry
+
+`/models` lists versions with metrics, lineage, and artifact **metadata**
+(never bytes, never object-store paths), compares two versions with
+direction-aware deltas, and promotes / archives / rolls back.
+
+Every mutation runs **confirm → apply → verify → audit → re-read**. The verify
+step re-reads the registry after the transition, because a transition that
+reported success without being checked is exactly what previously left the
+registry with no Production version at all. Verification failure returns `502
+REGISTRY_OPERATION_FAILED` — not a success.
+
+---
+
+## Authentication and audit
+
+JWT (HS256) with a `typ` claim separating access from refresh and verified
+`iss`/`aud`. Passwords are bcrypt at `BCRYPT_ROUNDS`. Refresh tokens are stored
+only as **SHA-256 digests**, so the database never holds a usable token, and no
+password or token is ever logged.
+
+| | |
+|---|---|
+| Access token | in the response body, held in **memory only** by the frontend — never `localStorage` |
+| Refresh token | `HttpOnly`, `SameSite=Lax`, `Path=/auth`, so it is never attached to a `/v1` request |
+| Rotation | single-use; **replaying a revoked token revokes the whole family** |
+| Lockout | after `MAX_LOGIN_ATTEMPTS`, and checked **before** the password so a locked account is not a password oracle |
+| Enumeration | a missing account is verified against a real cached bcrypt hash, so timing matches a wrong password |
+| Revocation | every request re-loads the user from the database, so deactivation and role changes apply immediately — and an unrecognised role fails closed |
+| Password change | revokes every session |
+| Lockout guards | you cannot change your own role, deactivate yourself, or remove the last active ADMIN |
+
+`audit_logs` is append-only and records authentication, every privileged
+mutation, and **every authorization denial**. Denials commit in their own
+transaction: `require_permission` audits and then raises `403`, FastAPI rolls
+the request session back, and a row written into *that* session would be
+discarded with it. Without this, denials were silently missing.
+
+---
+
+## ML pipeline
+
+`dags/sales_forecast_training.py`, `@weekly`:
+
+1. **Ingest** — pluggable data provider (`include/data_providers/`); the local
+   M5 provider reads the Parquet cache in `data/raw` and records dataset
+   lineage (`data_source`, `dataset_version`) that every forecast carries
+   forward.
+2. **Features** — 51 columns: lags, rolling windows (ddof=1), calendar,
+   holidays, store encoding.
+3. **Train** — XGBoost, LightGBM, and a cloudpickled ensemble, with a
+   `StandardScaler`.
+4. **Log and register** — params, metrics, and artifacts to MLflow; versions
+   registered as `sales_forecast_models_<model>`.
+
+`dags/sales_forecast_monitoring.py`, `@daily`: the HTTP orchestrator described
+above.
+
+The Streamlit **ML Operations Console** (`ui/`) is an API client. Its image
+installs no `mlflow`, `boto3`, `scikit-learn`, `xgboost`, or `lightgbm`, which
+is what makes direct artifact access impossible rather than merely
+discouraged.
+
+---
+
+## Measured performance
+
+Training metrics, as published by MLflow for the serving versions:
+
+| Model | WAPE | MAE | RMSE | R² | Bias |
+|---|---|---|---|---|---|
+| ensemble | 1.05% | 29.64 | 98.08 | 0.993 | +6.75 |
+| xgboost | 1.12% | 31.57 | 82.96 | 0.995 | +3.67 |
+
+**Those numbers overstate accuracy badly.** A real out-of-sample backtest
+measured:
+
+| Metric | Backtest | Training claim |
+|---|---|---|
+| WAPE | **18.2%** | 1.1% |
+| MAE | **779** | 29.6 |
+| RMSE | **956** | 98.1 |
+| Bias | **+292** | +6.7 |
+| R² | **0.458** | 0.995 |
+| 95% interval coverage | **55%** | — |
+
+The cause is target leakage in the feature set: `quantity_sold` *equals* `sales`
+and `profit` is exactly `0.3 × sales`. Those columns cannot be known for a
+future date, so serving reconstructs them from the last observed day — which is
+why a forecast reads as a level projection and why the training metrics are not
+reproducible out of sample.
+
+The platform reports this rather than hiding it: `/v1/monitoring/accuracy`
+carries the measured numbers, and monitoring raised the coverage alert on its
+own —
+
+> *Interval coverage is 55%. The 95% interval contained the actual 55% of the
+> time, so it is narrower than it claims.*
+
+Drift, measured live: PSI `forecast_error` **2.59** and `predicted_sales`
+**6.44** (both drifting); `actual_sales` **0.057** (stable).
+
+Trust the monitoring numbers, not the training card.
+
+---
+
+## Tests
+
+```bash
+# Backend -- 710 tests: services, routers, error contract, auth, RBAC,
+# monitoring, admin, scenario planner, dataset lineage
+pytest api/tests tests/api tests/test_dataset_lineage.py -q
+
+# Frontend -- 278 tests + strict typecheck + production build (11 routes)
+cd frontend && npx tsc --noEmit && npm test && npm run build
+
+# Live suite against a running stack -- 10 tests; skips without the password
+LIVE_API_URL=http://localhost:8000 LIVE_ADMIN_PASSWORD=… npm test -- live-api
+```
+
+The backend suite overrides authentication at the `get_current_user` seam only,
+so **permission checks still execute for real** — the RBAC tests assert actual
+403s rather than a mocked decision. The full matrix was additionally verified
+live across all five roles.
+
+---
+
+## Project layout
+
+```
+api/
+├── routers/        auth, forecast, scenario, monitoring, models, admin_*, health
+├── services/       forecast, feature, artifact, model_registry, registry_admin,
+│                   scenario_*, monitoring_*, auth, user, audit
+├── db/
+│   ├── models/     users, refresh_tokens, audit_logs, monitoring, scenarios
+│   ├── repositories/
+│   └── session.py
+├── schemas/        Pydantic v2, extra="forbid"
+├── core/           rbac.py · security.py · errors.py
+├── dependencies/   auth.py (require_permission) · scenario.py
+├── migrations/     Alembic (idempotent initial revision)
+├── bootstrap.py    first-run admin + monitoring service account
+└── tests/
+
+frontend/
+├── app/            11 routes (App Router)
+├── components/     forecast · scenario · monitoring · registry · admin · auth · layout
+├── hooks/          use-auth · use-forecast · use-models · use-monitoring · use-registry · use-admin
+├── lib/            api · auth-store · rbac · types · format
+└── tests/
+
+dags/               sales_forecast_training · sales_forecast_monitoring
+include/            training code, data providers, feature engineering
+ui/                 Streamlit ML Operations Console (API client only)
+docs/               ARCHITECTURE · USER_WORKFLOW · API · DEPLOYMENT · FORECAST_WORKFLOW · SCENARIO_PLANNER
+```
+
+---
+
+## Known limitations
+
+Honest list, in rough order of how much they matter:
+
+1. **Target leakage is unfixed.** `quantity_sold == sales` and
+   `profit == 0.3 × sales` are in the training feature set. Fixing it needs a
+   feature allowlist change in `include/` and a retrain; the 18.2% backtest
+   WAPE is what to expect, and may improve once the model is forced to learn
+   from non-leaked signal.
+2. **The 95% interval is over-confident** — 55% measured coverage. The residual
+   estimate comes from the (leaked) training RMSE, so it is too small. A
+   conformal or backtest-derived residual would fix it.
+3. **Scenario levers are near-inert for this model**, because
+   `has_promotion`, `customer_traffic`, and `is_holiday` were effectively
+   constant in training. The platform discloses this; making the levers
+   meaningful requires training data in which they actually vary.
+4. **`closure` and `price` scenarios are unsupported** — no corresponding
+   feature exists. Correctly refused with `409` rather than approximated.
+5. **Monitoring shows the no-data state by default.** The M5 actuals end
+   **2016-04-24**, so a rolling 28-day window around today has no scorable
+   pairs; real numbers come from an explicit backtest window.
+6. **Drift is prediction drift, not feature drift.** Feature drift would need
+   the per-request feature matrix persisted.
+7. **`max_sales_files: 365` truncates training data** in the ingestion config.
+8. **No CI.** Python lint, frontend lint, and Docker build checks are not wired
+   into a pipeline yet; all three run clean locally.
+9. **No SSO/OIDC, MFA, per-user API keys, or global rate limiting** beyond
+   login lockout.
+10. **The Airflow image carries a stale baked-in copy of `api/`** — harmless
+    now that no DAG imports it, but it should be dropped from the image.
+11. **The frontend runs `next dev`** in compose. For production, build the app
+    and serve `next start`.
+12. **MLflow, MinIO, and Airflow have no authentication** in this compose
+    setup. Do not publish 5001, 9000, 9001, or 8080 beyond localhost.
+
+---
+
+## Documentation
+
+| Document | Contents |
+|---|---|
+| **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | system architecture, trust boundary, auth flow, RBAC, database schema, forecast / scenario / monitoring / registry workflows, audit logging, API layering rules |
+| **[docs/USER_WORKFLOW.md](docs/USER_WORKFLOW.md)** | per-role walkthroughs: business user, analyst, ML engineer, administrator, viewer |
+| **[docs/API.md](docs/API.md)** | every endpoint with its permission, plus request/response examples captured from the running stack |
+| **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** | Docker setup, services and ports, every environment variable, initial admin, migrations, security checklist, backup, troubleshooting |
+| **[docs/FORECAST_WORKFLOW.md](docs/FORECAST_WORKFLOW.md)** | the forecast path in depth, including the feature contract |
+| **[docs/SCENARIO_PLANNER.md](docs/SCENARIO_PLANNER.md)** | the scenario engine, overrides, and capability gating |
+
+Interactive API docs: <http://localhost:8000/docs>.
+
+---
+
+## License
+
+See [LICENSE](LICENSE).

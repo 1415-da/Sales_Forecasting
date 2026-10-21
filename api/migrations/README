@@ -1,0 +1,14 @@
+Alembic migrations for the Sales Forecasting API.
+
+The database URL is read from SCENARIO_DATABASE_URL (or DATABASE_URL) by
+env.py; it is deliberately absent from alembic.ini so no credential is
+committed and the same scripts run in every environment.
+
+  alembic upgrade head          # apply
+  alembic downgrade -1          # revert the last migration
+  alembic current               # what is applied
+  alembic revision --autogenerate -m "describe the change"
+
+The API also calls create_all() at start-up, which creates missing tables but
+never alters one. That exists so a fresh local database works without a
+migration step; Alembic is what owns the schema anywhere it matters.

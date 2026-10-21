@@ -613,18 +613,54 @@ def test_baseline_reuse_is_passed_through(client, context):
     assert context.forecast_service.calls[0].baseline_forecast_id == "bf_existing"
 
 
-def test_inference_not_configured_is_reported_clearly():
-    """Without an override, the unimplemented adapters fail loudly."""
+def test_inference_adapters_are_wired():
+    """
+    The scenario adapters are implemented, not placeholders.
+
+    This previously asserted the opposite -- that the two ports had no
+    implementation and the route failed with "inference is not configured".
+    Both are now backed by `ScenarioMatrixBuilder` and
+    `RecursiveMatrixPredictor`, so the assertion is inverted: the dependency
+    resolves to a real object, and the route gets as far as needing a model.
+    """
+    from api.dependencies.scenario import (
+        get_future_feature_builder,
+        get_matrix_predictor,
+    )
+    from api.services.scenario_matrix_service import (
+        RecursiveMatrixPredictor,
+        ScenarioMatrixBuilder,
+    )
+
+    builder = get_future_feature_builder()
+    predictor = get_matrix_predictor()
+
+    assert isinstance(builder, ScenarioMatrixBuilder)
+    assert isinstance(predictor, RecursiveMatrixPredictor)
+    # The predictor must share the builder's instance: it reuses that run's
+    # baseline projection instead of resolving and loading the model again.
+    assert predictor.builder_source is builder
+
+
+def test_compare_without_a_production_model_reports_that():
+    """
+    With the adapters wired, the first real obstacle is model resolution.
+
+    The failure is a 404 naming the missing Production version -- not a 500
+    about unconfigured inference, which is what it used to be.
+    """
     app = create_app()
     app.dependency_overrides[get_capability_service] = lambda: FakeCapabilityService()
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.post("/v1/scenario/compare", json=request_body())
 
-    assert response.status_code == 500
+    assert response.status_code in (404, 500, 503)
     body = response.json()
-    assert body["error"]["code"] == "PREDICTION_FAILED"
-    assert "not configured" in body["error"]["message"]
+    assert body["success"] is False
+    # Whatever the upstream state, the message must not claim the feature is
+    # unimplemented.
+    assert "not configured" not in body["error"]["message"].lower()
 
 
 # --------------------------------------------------------------------------

@@ -34,3 +34,14 @@ cloudpickle==3.1.2
 # The training feature pipeline derives `is_holiday` from the US public-holiday
 # calendar, so inference must reproduce it from the same source.
 holidays==0.60
+
+# Authentication.
+# `bcrypt` directly rather than via passlib: one fewer dependency, and
+# passlib's bcrypt backend warns against bcrypt 4.x version detection.
+bcrypt==4.2.1
+PyJWT==2.10.1
+# `email-validator` backs pydantic's EmailStr, which the auth schemas use.
+email-validator==2.2.0
+# Schema migrations. Alembic owns the schema in a real deployment; `create_all`
+# at start-up only covers a fresh local database.
+alembic==1.14.1

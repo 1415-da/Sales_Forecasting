@@ -10,10 +10,18 @@ Artifact access sits behind the ``ArtifactClient`` protocol so the service can b
 unit tested without a live MLflow server, and so a future S3/MinIO-direct reader
 can be swapped in without touching the capability logic.
 
-Note: the artifact producer does not exist yet -- training does not currently
-write ``feature_schema.json``. Until a later task adds the writer, this service
-raises FEATURE_SCHEMA_MISSING, which is exactly the contract the frontend needs
-to degrade gracefully.
+Resolution order
+----------------
+1. ``feature_schema.json``, the artifact a training run is *meant* to publish.
+2. ``feature_cols.pkl``, which every run does publish.
+
+The fallback exists because training has never written ``feature_schema.json``,
+and the whole Scenario Planner depends on knowing the model's feature list --
+which ``feature_cols.pkl`` already contains. Deriving it is strictly better
+than reporting FEATURE_SCHEMA_MISSING for information the platform demonstrably
+has. A derived schema is marked as such in ``source_uri`` so it is never
+mistaken for a contract the training side published and promised to keep
+stable.
 """
 
 from __future__ import annotations
@@ -33,6 +41,10 @@ from api.schemas.scenario_capabilities import FeatureSchema, FeatureSchemaErrorR
 logger = logging.getLogger(__name__)
 
 DEFAULT_FEATURE_SCHEMA_ARTIFACT = "feature_schema.json"
+
+#: Marks a schema derived from `feature_cols.pkl` rather than read from a
+#: published `feature_schema.json`.
+DERIVED_SCHEMA_VERSION = "v1-derived"
 FEATURE_SCHEMA_ARTIFACT_ENV_VAR = "FEATURE_SCHEMA_ARTIFACT_PATH"
 MLFLOW_EXPERIMENT_ENV_VAR = "MLFLOW_EXPERIMENT_NAME"
 MLFLOW_REGISTERED_MODEL_ENV_VAR = "MLFLOW_REGISTERED_MODEL_NAME"
@@ -294,15 +306,66 @@ class FeatureSchemaService:
         run_id = self.artifact_client.resolve_run_id(version)
         local_path = self.artifact_client.download_artifact(run_id, self.artifact_path)
 
-        if not local_path or not os.path.isfile(local_path):
-            raise self._missing_error(version, run_id)
-
-        payload = self._read_json(version, run_id, local_path)
-        schema = self._parse_schema(version, run_id, payload)
+        if local_path and os.path.isfile(local_path):
+            payload = self._read_json(version, run_id, local_path)
+            schema = self._parse_schema(version, run_id, payload)
+        else:
+            # Training does not publish `feature_schema.json`, but every run
+            # publishes `feature_cols.pkl` with the same information. Deriving
+            # the schema from it is better than refusing to answer a question
+            # the platform can answer.
+            schema = self._derive_from_feature_cols(version, run_id)
 
         if self.cache_enabled:
             self._cache[cache_key] = schema
         return schema
+
+    def _derive_from_feature_cols(self, model_version: str, run_id: str) -> FeatureSchema:
+        """
+        Build a schema from the run's ``feature_cols.pkl``.
+
+        Uses the same artifact transport as inference, so a schema is available
+        exactly when the model is loadable -- the two cannot disagree about
+        which features the model takes.
+
+        Raises FEATURE_SCHEMA_MISSING when neither artifact is readable, which
+        is the honest answer and the contract the frontend already handles.
+        """
+        try:
+            from api.config import FEATURE_COLS_ARTIFACT
+            from api.services.artifact_service import ArtifactService
+
+            features = ArtifactService()._load(  # noqa: SLF001 - same package
+                run_id, FEATURE_COLS_ARTIFACT, required=True
+            )
+        except Exception as exc:  # noqa: BLE001 - reported as the typed error
+            logger.warning(
+                "Could not derive a feature schema from %s for run %s: %s",
+                FEATURE_COLS_ARTIFACT,
+                run_id,
+                exc,
+            )
+            raise self._missing_error(model_version, run_id) from exc
+
+        names = [str(name).strip() for name in (features or []) if str(name).strip()]
+        if not names:
+            raise self._missing_error(model_version, run_id)
+
+        logger.info(
+            "Derived a %d-feature schema for model version %s from %s",
+            len(names),
+            model_version,
+            FEATURE_COLS_ARTIFACT,
+        )
+        return FeatureSchema(
+            schema_version=DERIVED_SCHEMA_VERSION,
+            model_version=model_version,
+            features=names,
+            run_id=run_id,
+            # Names the artifact it came from, so a consumer can tell a derived
+            # schema from a published one.
+            source_uri=f"derived:{FEATURE_COLS_ARTIFACT}",
+        )
 
     def _missing_error(self, model_version: str, run_id: str) -> FeatureSchemaError:
         """The documented FEATURE_SCHEMA_MISSING failure."""

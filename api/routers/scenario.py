@@ -17,8 +17,9 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Body, Depends, Header, Path, Query, Response
+from fastapi import APIRouter, Body, Depends, Header, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.orm import Session
 
 from api.core.errors import (
     BaselineNotFoundError,
@@ -26,13 +27,18 @@ from api.core.errors import (
     ScenarioNotFoundError,
     ScenarioNotSupportedError,
 )
+from api.core.rbac import Permission
+from api.db.models.user import User
+from api.db.session import get_session
+from api.db.models.audit import AuditAction, ResourceType
+from api.services.audit_service import OUTCOME_FAILURE, AuditService
+from api.dependencies.auth import actor_for, require_permission
 from api.dependencies.scenario import (
     get_audit_service,
     get_capability_service,
     get_checkpoint_service,
     get_forecast_service,
     get_rollback_service,
-    require_privileged_role,
 )
 from api.middleware.error_handler import REQUEST_ID_HEADER, get_request_id, new_request_id
 from api.observability.scenario_logging import (
@@ -159,8 +165,14 @@ def get_capabilities(
         description="Registry version, or 'latest' for the current Production model.",
     ),
     capability_service: ScenarioCapabilityService = Depends(get_capability_service),
+    user: User = Depends(require_permission(Permission.VIEW_SCENARIO)),
 ) -> ScenarioCapabilitiesResponse:
-    """Report which scenario types this model version supports, and why not."""
+    """
+    Report which scenario types this model version supports, and why not.
+
+    Read-only, so every role may call it: the planner has to know what is
+    possible before it can disable what is not.
+    """
     return capability_service.get_capabilities(model_version)
 
 
@@ -173,6 +185,7 @@ def get_capabilities(
 def get_baseline(
     baseline_forecast_id: str = Path(description="Identifier returned by a comparison."),
     checkpoint_service=Depends(get_checkpoint_service),
+    user: User = Depends(require_permission(Permission.VIEW_SCENARIO)),
 ) -> BaselineForecastCheckpoint:
     """
     Return a baseline checkpoint.
@@ -205,31 +218,69 @@ def get_baseline(
 def compare_scenario(
     request: ScenarioRequest,
     response: Response,
+    http_request: Request,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     forecast_service: ScenarioForecastService = Depends(get_forecast_service),
     capability_service: ScenarioCapabilityService = Depends(get_capability_service),
     audit_service: ScenarioAuditService = Depends(get_audit_service),
     rollback_service: ScenarioRollbackService = Depends(get_rollback_service),
+    user: User = Depends(require_permission(Permission.RUN_SCENARIO)),
+    session: Session = Depends(get_session),
 ) -> ScenarioComparisonResponse:
     """
     Run a what-if comparison.
 
     Replays a previous result when the same ``Idempotency-Key`` is reused with
     an identical payload, and conflicts (409) when it is reused with a different
-    one. Every attempt -- successful or not -- lands in the audit trail.
+    one. Every attempt -- successful or not -- lands in the scenario audit
+    trail, and the comparison is additionally recorded in the platform-wide
+    audit log so "who ran what" is answerable from one place.
     """
     request_id = get_request_id() or new_request_id()
     response.headers[REQUEST_ID_HEADER] = request_id
+    actor = actor_for(user, http_request)
 
-    return _run_comparison(
-        request=request,
-        request_id=request_id,
-        idempotency_key=idempotency_key,
-        forecast_service=forecast_service,
-        capability_service=capability_service,
-        audit_service=audit_service,
-        rollback_service=rollback_service,
+    try:
+        comparison = _run_comparison(
+            request=request,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            forecast_service=forecast_service,
+            capability_service=capability_service,
+            audit_service=audit_service,
+            rollback_service=rollback_service,
+        )
+    except Exception as exc:
+        # A refused or failed scenario is as worth recording as a successful
+        # one: a pattern of failures is how an unsupported model is noticed.
+        AuditService(session).record(
+            action=AuditAction.SCENARIO_COMPARED,
+            resource_type=ResourceType.SCENARIO,
+            actor=actor,
+            outcome=OUTCOME_FAILURE,
+            metadata={
+                "store_id": request.store_id,
+                "scenario_type": request.scenario.scenario_type.value,
+                "error": type(exc).__name__,
+            },
+        )
+        raise
+
+    AuditService(session).record(
+        action=AuditAction.SCENARIO_COMPARED,
+        resource_type=ResourceType.SCENARIO,
+        resource_id=comparison.scenario_id,
+        actor=actor,
+        metadata={
+            "store_id": comparison.store_id,
+            "scenario_type": request.scenario.scenario_type.value,
+            "model_version": comparison.model_version,
+            "horizon_days": request.horizon_days,
+            "baseline_forecast_id": comparison.baseline_forecast_id,
+        },
     )
+    _attribute_scenario(session, comparison.scenario_id, user)
+    return comparison
 
 
 @router.get(
@@ -245,6 +296,7 @@ def get_scenario(
     scenario_id: str = Path(description="Identifier returned by a comparison."),
     audit_service: ScenarioAuditService = Depends(get_audit_service),
     checkpoint_service=Depends(get_checkpoint_service),
+    user: User = Depends(require_permission(Permission.VIEW_SCENARIO)),
 ) -> ScenarioComparisonResponse:
     """
     Return a previously computed comparison.
@@ -288,6 +340,7 @@ def rollback_scenario(
     scenario_id: str = Path(description="Scenario to roll back."),
     body: ScenarioRollbackRequest = Body(...),
     rollback_service: ScenarioRollbackService = Depends(get_rollback_service),
+    user: User = Depends(require_permission(Permission.RUN_SCENARIO)),
 ) -> RollbackResponse:
     """
     Mark a scenario rolled back.
@@ -329,14 +382,14 @@ def rollback_scenario(
 def get_scenario_audit(
     scenario_id: str = Path(description="Scenario whose history to return."),
     audit_service: ScenarioAuditService = Depends(get_audit_service),
-    _role: Optional[str] = Depends(require_privileged_role),
+    user: User = Depends(require_permission(Permission.VIEW_AUDIT_LOGS)),
 ) -> ScenarioAuditListResponse:
     """
     Return every audit event recorded for a scenario, oldest first.
 
-    TODO(auth): intended for admin / ML-engineer roles only. See
-    ``require_privileged_role`` -- there is no authentication layer to enforce
-    that yet, so this endpoint must not be exposed to untrusted networks.
+    Requires ``VIEW_AUDIT_LOGS`` (ADMIN or ML_ENGINEER). This replaces the
+    earlier placeholder, which read a role from a client-supplied header and
+    could therefore be set by any caller.
     """
     events = audit_service.get_by_scenario_id(scenario_id)
     if not events:
@@ -633,3 +686,30 @@ def _scenario_not_found(
 def _elapsed_ms(started: float) -> int:
     """Milliseconds since ``started``."""
     return int((time.perf_counter() - started) * 1000)
+
+
+def _attribute_scenario(session: Session, scenario_id: str, user: User) -> None:
+    """
+    Stamp the saved scenario row with who created it.
+
+    Done here rather than inside the comparison service so that service stays
+    free of any dependency on the authentication layer. Best-effort: a
+    persisted comparison without attribution is far better than losing the
+    comparison because an attribution write failed.
+    """
+    try:
+        from sqlalchemy import select
+
+        from api.db.models.scenario import ScenarioForecast
+
+        row = session.execute(
+            select(ScenarioForecast).where(
+                ScenarioForecast.scenario_id == scenario_id
+            )
+        ).scalar_one_or_none()
+        if row is not None and row.created_by_id is None:
+            row.created_by_id = user.id
+            row.created_by_email = user.email
+            session.flush()
+    except Exception as exc:  # noqa: BLE001 - attribution must not fail a result
+        logger.warning("Could not attribute scenario %s: %s", scenario_id, exc)

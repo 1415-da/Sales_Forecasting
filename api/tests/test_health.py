@@ -149,12 +149,20 @@ def test_health_never_leaks_credentials_or_hosts(make_client):
 # --------------------------------------------------------------------------
 
 
-def test_readiness_is_503_without_a_critical_dependency(make_client):
+def test_readiness_is_503_without_a_critical_dependency(make_client, monkeypatch):
     """
     No database configured means the API is not ready to take traffic.
 
-    Unlike ``/health``, this probe is allowed to fail -- that is its job.
+    Unlike ``/health``, this probe is allowed to fail -- that is its job. The
+    database URL is unset explicitly because the suite otherwise provisions
+    one for the authentication tables.
     """
+    from api.db.session import DATABASE_URL_ENV_VARS, reset_engine
+
+    for name in DATABASE_URL_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    reset_engine()
+
     response = make_client(StubRegistry(PRODUCTION_SUMMARY)).get("/health/ready")
     assert response.status_code == 503
     body = response.json()

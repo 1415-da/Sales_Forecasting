@@ -12,16 +12,23 @@ Run locally with::
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.bootstrap import run_startup_tasks
 from api.config import Settings, get_settings
 from api.middleware.error_handler import install_error_handlers
 from api.observability.scenario_logging import configure_json_logging
+from api.routers import admin_audit as admin_audit_router
+from api.routers import admin_users as admin_users_router
+from api.routers import auth as auth_router
 from api.routers import forecast as forecast_router
 from api.routers import health as health_router
 from api.routers import models as models_router
+from api.routers import monitoring as monitoring_router
 from api.routers import scenario as scenario_router
 
 logger = logging.getLogger(__name__)
@@ -31,12 +38,23 @@ API_DESCRIPTION = (
     "All model loading and inference happens here: a client supplies a sales "
     "history and receives a forecast, and never touches MLflow, MinIO, "
     "PostgreSQL, or an artifact path.\n\n"
-    "Endpoints are grouped as Forecast (generate a projection), Models "
-    "(discover what is serving), Scenario Planner (predictive what-if "
-    "analysis), and Operations (health and metrics)."
+    "**Authentication.** Every `/v1/*` route requires a bearer access token "
+    "from `POST /auth/login`. The refresh token is delivered as an HttpOnly "
+    "cookie and exchanged at `POST /auth/refresh`. `/auth/*` and `/health*` "
+    "are public.\n\n"
+    "**Authorization.** Each route requires a named capability. A missing "
+    "capability is a 403 and is recorded in the audit log; the role/permission "
+    "matrix is served at `GET /v1/admin/permissions`."
 )
 
 OPENAPI_TAGS = [
+    {
+        "name": auth_router.TAG,
+        "description": (
+            "Sign-in, sign-out, token refresh, and the current user. The only "
+            "routes that do not require an access token."
+        ),
+    },
     {
         "name": forecast_router.TAG,
         "description": (
@@ -57,6 +75,25 @@ OPENAPI_TAGS = [
         "description": (
             "Predictive what-if analysis. Scenario results are estimates from "
             "the selected production model and do not establish causal impact."
+        ),
+    },
+    {
+        "name": monitoring_router.TAG,
+        "description": (
+            "Forecast accuracy, data freshness, drift, and alerts. Populated "
+            "by the monitoring DAG; endpoints report an explicit no-data state "
+            "rather than inventing figures."
+        ),
+    },
+    {
+        "name": admin_users_router.TAG,
+        "description": "User and role administration. ADMIN only.",
+    },
+    {
+        "name": admin_audit_router.TAG,
+        "description": (
+            "Audit trail of privileged and attributable actions. ADMIN sees "
+            "everything; ML_ENGINEER sees model and monitoring activity."
         ),
     },
     {
@@ -94,6 +131,21 @@ def install_cors(app: FastAPI, settings: Settings) -> None:
     logger.info("CORS enabled for origins: %s", ", ".join(origins))
 
 
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    Run start-up tasks before the first request is served.
+
+    A lifespan handler rather than the deprecated ``on_event``. The work --
+    ensuring the schema exists and creating the first admin when there is none
+    -- is deliberately tolerant of failure: a database that is not ready yet
+    should leave the API serving ``/health`` (which reports it as unavailable)
+    rather than crash-looping the container.
+    """
+    run_startup_tasks()
+    yield
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """
     Build the application.
@@ -108,6 +160,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=settings.api_version,
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
+        lifespan=lifespan,
     )
 
     # Events are emitted as JSON lines; configure that before any request can
@@ -126,9 +179,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     install_cors(app, settings)
 
     app.include_router(health_router.router)
+    app.include_router(auth_router.router)
     app.include_router(models_router.router)
     app.include_router(forecast_router.router)
     app.include_router(scenario_router.router)
+    app.include_router(monitoring_router.router)
+    app.include_router(admin_users_router.router)
+    app.include_router(admin_audit_router.router)
+
+
 
     logger.info(
         "Sales Forecasting API initialised (version %s)", settings.api_version

@@ -105,34 +105,39 @@ def get_impact_service() -> ScenarioImpactService:
     return ScenarioImpactService()
 
 
+@lru_cache(maxsize=1)
 def get_future_feature_builder() -> FutureFeatureBuilder:
     """
     Builder for the baseline forecast-time feature matrix.
 
-    No adapter exists yet: nothing in the codebase produces a forecast-time
-    feature matrix (``SimplePredictor`` builds features row-by-row inside its own
-    recursive loop). Rather than fabricate one, this raises with a message that
-    names the gap, so ``POST /v1/scenario/compare`` fails loudly and
-    diagnosably instead of returning a fabricated comparison.
-
-    Override this dependency to supply the real adapter.
+    Backed by ``ScenarioMatrixBuilder``, which runs the shared forecast
+    pipeline and returns exactly the feature rows the baseline was computed
+    from. Returning a separately derived matrix would risk comparing the
+    scenario against features the baseline never saw.
     """
-    raise PredictionFailedError(
-        INFERENCE_NOT_CONFIGURED_MESSAGE,
-        details={"missing_adapter": "FutureFeatureBuilder"},
-    )
+    from api.services.scenario_matrix_service import ScenarioMatrixBuilder
+
+    return ScenarioMatrixBuilder()
 
 
+@lru_cache(maxsize=1)
 def get_matrix_predictor() -> FeatureMatrixPredictor:
     """
     Predictor that runs a model over a prepared feature matrix.
 
-    Not implemented yet, for the same reason as ``get_future_feature_builder``.
-    Override this dependency to supply the real adapter.
+    Backed by ``RecursiveMatrixPredictor``, and wired to the *same* builder
+    instance: the predictor reuses that run's baseline projection, so the
+    scenario leg does not resolve and reload the model a second time, and both
+    legs are guaranteed to use one model version.
     """
-    raise PredictionFailedError(
-        INFERENCE_NOT_CONFIGURED_MESSAGE,
-        details={"missing_adapter": "FeatureMatrixPredictor"},
+    from api.services.scenario_matrix_service import (
+        RecursiveMatrixPredictor,
+        ScenarioMatrixBuilder,
+    )
+
+    builder = get_future_feature_builder()
+    return RecursiveMatrixPredictor(
+        builder_source=builder if isinstance(builder, ScenarioMatrixBuilder) else None
     )
 
 
