@@ -10,10 +10,10 @@ import { useAuth } from '@/hooks/use-auth';
 /**
  * Routes rendered without the application frame.
  *
- * The sign-in pages have no navigation to show -- the nav is derived from the
- * signed-in user's permissions, and there is no user yet.
+ * The public landing and sign-in pages have no navigation to show -- the nav
+ * is derived from the signed-in user's permissions, and there is no user yet.
  */
-const BARE_ROUTES = new Set(['/login', '/register']);
+const BARE_ROUTES = new Set(['/', '/login', '/register']);
 
 /**
  * The application frame.
