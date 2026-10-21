@@ -82,14 +82,18 @@ echo "JWT_SECRET_KEY=$(openssl rand -base64 48)" >> .env
 astro dev start
 ```
 
-| | |
+
+## Local Services
+
+| Service | URL |
 |---|---|
-| Web app | <http://localhost:3001> |
-| API docs | <http://localhost:8010/docs> |
-| Airflow | <http://localhost:8080> |
-| MLflow | <http://localhost:5001> |
-| Ops console | <http://localhost:8501> |
-| MinIO console | <http://localhost:9001> |
+| Sales Forecasting Frontend | http://localhost:3001 |
+| FastAPI API Docs | http://localhost:8010/docs |
+| Streamlit ML Ops Console | http://localhost:8501 |
+| Apache Airflow | http://localhost:19382 |
+| MLflow | http://localhost:5001 |
+| MinIO Console | http://localhost:9001 |
+| MinIO API | http://localhost:9000 |
 
 ### OrbStack quick links
 
