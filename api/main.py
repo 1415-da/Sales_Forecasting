@@ -1,8 +1,8 @@
 """
 FastAPI application for the Sales Forecasting serving layer.
 
-Composition only: build the app, install the error boundary and request-id
-middleware, and register routers. No business logic lives here.
+Composition only: build the app, install CORS and the error boundary, and
+register routers. No business logic lives here.
 
 Run locally with::
 
@@ -12,96 +12,127 @@ Run locally with::
 from __future__ import annotations
 
 import logging
-import os
-from typing import Any, Dict
 
-from fastapi import FastAPI, Response
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
+from api.config import Settings, get_settings
 from api.middleware.error_handler import install_error_handlers
-from api.observability.health import build_health_report
 from api.observability.scenario_logging import configure_json_logging
-from api.observability.scenario_metrics import CONTENT_TYPE_PROMETHEUS, get_metrics
+from api.routers import forecast as forecast_router
+from api.routers import health as health_router
+from api.routers import models as models_router
 from api.routers import scenario as scenario_router
 
 logger = logging.getLogger(__name__)
 
-API_TITLE = "Sales Forecasting API"
-API_VERSION = "0.1.0"
 API_DESCRIPTION = (
-    "Serving layer for the Astro Sales Forecasting platform. Exposes the "
-    "Scenario Planner: capability discovery, baseline forecasts, what-if "
-    "comparisons, rollback, and audit history."
+    "Serving layer for the Astro Sales Forecasting platform.\n\n"
+    "All model loading and inference happens here: a client supplies a sales "
+    "history and receives a forecast, and never touches MLflow, MinIO, "
+    "PostgreSQL, or an artifact path.\n\n"
+    "Endpoints are grouped as Forecast (generate a projection), Models "
+    "(discover what is serving), Scenario Planner (predictive what-if "
+    "analysis), and Operations (health and metrics)."
 )
 
 OPENAPI_TAGS = [
     {
-        "name": scenario_router.TAG,
+        "name": forecast_router.TAG,
         "description": (
-            "Predictive what-if analysis. Scenario results are estimates from the "
-            "selected production model and do not establish causal impact."
+            "Multi-day sales forecasts from the Production model. Point "
+            "forecasts carry a constructed uncertainty band; the method is "
+            "reported on every response."
         ),
     },
     {
-        "name": "Operations",
+        "name": models_router.TAG,
+        "description": (
+            "Registered model versions, their stage, their training metrics, "
+            "and the stores they were trained on."
+        ),
+    },
+    {
+        "name": scenario_router.TAG,
+        "description": (
+            "Predictive what-if analysis. Scenario results are estimates from "
+            "the selected production model and do not establish causal impact."
+        ),
+    },
+    {
+        "name": health_router.TAG,
         "description": "Health, readiness, and metrics endpoints.",
     },
 ]
 
 
-def create_app() -> FastAPI:
+def install_cors(app: FastAPI, settings: Settings) -> None:
+    """
+    Allow the configured browser origins to call the API.
+
+    An explicit origin list rather than ``*``: the API echoes a request id and
+    will later carry authenticated calls, and a wildcard origin cannot be
+    combined with credentials. Origins come from ``API_CORS_ALLOW_ORIGINS`` so a
+    deployment on a different host does not need a code change.
+    """
+    origins = list(settings.cors_allow_origins)
+    if not origins:
+        logger.warning(
+            "No CORS origins configured; browser clients will be blocked. "
+            "Set API_CORS_ALLOW_ORIGINS."
+        )
+        return
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Content-Type", "X-Request-ID", "Idempotency-Key"],
+        expose_headers=["X-Request-ID"],
+    )
+    logger.info("CORS enabled for origins: %s", ", ".join(origins))
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
     """
     Build the application.
 
     A factory rather than a module-level singleton so tests can construct an
     isolated app (and its own dependency overrides) per case.
     """
+    settings = settings or get_settings()
+
     app = FastAPI(
-        title=API_TITLE,
-        version=API_VERSION,
+        title=settings.api_title,
+        version=settings.api_version,
         description=API_DESCRIPTION,
         openapi_tags=OPENAPI_TAGS,
     )
 
-    # Scenario events are emitted as JSON lines; configure that before any
-    # request can be served.
+    # Events are emitted as JSON lines; configure that before any request can
+    # be served.
     configure_json_logging()
 
     # Installs the request-id middleware and the exception handlers that render
     # every failure as the one documented error envelope.
     install_error_handlers(app)
 
+    # Added last, so it is the outermost middleware. Starlette handles an
+    # unhandled exception in ServerErrorMiddleware, which sits outside the user
+    # middleware stack; unless CORS is outermost, that 500 would reach the
+    # browser without CORS headers and surface as an opaque network error
+    # instead of the error envelope the frontend knows how to render.
+    install_cors(app, settings)
+
+    app.include_router(health_router.router)
+    app.include_router(models_router.router)
+    app.include_router(forecast_router.router)
     app.include_router(scenario_router.router)
 
-    @app.get("/health", tags=["Operations"], summary="Health and dependencies")
-    def health(deep: bool = True) -> Dict[str, Any]:
-        """
-        Report API, database, MLflow, MinIO, and feature-schema state.
-
-        Always 200 while the process itself is serving: an orchestrator should
-        not restart a healthy API because an upstream is briefly down. Use
-        ``/health/ready`` for a probe that fails on a critical dependency, or
-        ``?deep=false`` for a cheap check that touches nothing.
-        """
-        return build_health_report(API_VERSION, deep=deep).to_dict()
-
-    @app.get("/health/ready", tags=["Operations"], summary="Readiness probe")
-    def readiness(response: Response) -> Dict[str, Any]:
-        """503 when a dependency the planner cannot work without is unavailable."""
-        report = build_health_report(API_VERSION, deep=True)
-        if not report.is_ready:
-            response.status_code = 503
-        payload = report.to_dict()
-        payload["ready"] = report.is_ready
-        return payload
-
-    @app.get("/metrics", tags=["Operations"], summary="Prometheus metrics")
-    def metrics() -> Response:
-        """Scenario metrics in the Prometheus text exposition format."""
-        return Response(
-            content=get_metrics().render(), media_type=CONTENT_TYPE_PROMETHEUS
-        )
-
-    logger.info("Sales Forecasting API initialised (version %s)", API_VERSION)
+    logger.info(
+        "Sales Forecasting API initialised (version %s)", settings.api_version
+    )
     return app
 
 

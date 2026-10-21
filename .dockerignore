@@ -6,3 +6,15 @@ logs/
 .venv
 airflow.db
 airflow.cfg
+
+# Build-context hygiene for the API image: none of these belong in it, and
+# `data/` in particular is hundreds of megabytes of parquet.
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+frontend/.next/
+data/
+mlflow.db
+session_logs/
+.DS_Store

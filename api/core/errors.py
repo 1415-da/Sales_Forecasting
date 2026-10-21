@@ -53,6 +53,12 @@ class ScenarioErrorCode(str, Enum):
     # or expired comparison as BASELINE_* would misname the resource.
     SCENARIO_NOT_FOUND = "SCENARIO_NOT_FOUND"
     SCENARIO_EXPIRED = "SCENARIO_EXPIRED"
+    # Additive, for the forecast endpoints: a caller who sent too little
+    # history, or history whose columns the model cannot consume, needs to be
+    # told which of the two it was -- both would otherwise collapse into the
+    # generic validation code and the UI could not offer specific guidance.
+    INSUFFICIENT_HISTORY = "INSUFFICIENT_HISTORY"
+    FEATURE_MISMATCH = "FEATURE_MISMATCH"
 
 
 ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
@@ -74,6 +80,8 @@ ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
     ScenarioErrorCode.IDEMPOTENCY_KEY_CONFLICT: 409,
     ScenarioErrorCode.SCENARIO_NOT_FOUND: 404,
     ScenarioErrorCode.SCENARIO_EXPIRED: 410,
+    ScenarioErrorCode.INSUFFICIENT_HISTORY: 422,
+    ScenarioErrorCode.FEATURE_MISMATCH: 409,
 }
 
 # Service-level codes predate this taxonomy. Mapping them here keeps the
@@ -87,7 +95,7 @@ LEGACY_CODE_MAP: Dict[str, ScenarioErrorCode] = {
     # baseline forecast service
     "MODEL_NOT_IN_PRODUCTION": ScenarioErrorCode.MODEL_NOT_IN_PRODUCTION,
     "MLFLOW_UNAVAILABLE": ScenarioErrorCode.MLFLOW_UNAVAILABLE,
-    "INSUFFICIENT_HISTORY": ScenarioErrorCode.SCENARIO_VALIDATION_ERROR,
+    "INSUFFICIENT_HISTORY": ScenarioErrorCode.INSUFFICIENT_HISTORY,
     "PREDICTION_FAILED": ScenarioErrorCode.PREDICTION_FAILED,
     "DATABASE_UNAVAILABLE": ScenarioErrorCode.DATABASE_UNAVAILABLE,
     # checkpoint service
@@ -322,6 +330,23 @@ class PredictionFailedError(ScenarioPlannerError):
 
     code = ScenarioErrorCode.PREDICTION_FAILED
     default_message = "The forecast could not be generated."
+
+
+class InsufficientHistoryError(ScenarioPlannerError):
+    """Too few history days to populate the model's lag/rolling inputs. -> 422"""
+
+    code = ScenarioErrorCode.INSUFFICIENT_HISTORY
+    default_message = "Not enough history was supplied to generate a forecast."
+
+
+class FeatureMismatchError(ScenarioPlannerError):
+    """The model expects inputs that cannot be built from this request. -> 409"""
+
+    code = ScenarioErrorCode.FEATURE_MISMATCH
+    default_message = (
+        "The selected model expects features that could not be built from the "
+        "supplied history."
+    )
 
 
 class ForecastAlignmentError(ScenarioPlannerError):

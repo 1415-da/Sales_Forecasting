@@ -5,19 +5,18 @@ Produces the "do nothing" forecast that scenarios are compared against, and
 records a rollback-safe checkpoint around it: the database row is written with
 status ``created`` before inference, then moved to ``completed`` or ``failed``.
 
-Reuse, not reimplementation: prediction is delegated through the ``ModelPredictor``
-port, whose default adapter calls the existing ``SimpleModelLoader`` /
-``SimplePredictor`` stack (and therefore the existing feature engineering)
-without modifying it. Model resolution goes through the ``ModelResolver`` port,
-whose default adapter reads the MLflow registry. Both ports keep ``api/`` free of
-a hard dependency on ``ui/`` and make the service unit testable without MLflow,
-a database, or a trained model.
+One pipeline, not two: prediction is delegated through the ``ModelPredictor``
+port, whose default adapter calls ``ForecastService.project`` -- the same code
+``POST /v1/forecast`` runs. A baseline and a forecast for the same inputs are
+therefore the same number. Model resolution goes through the ``ModelResolver``
+port, whose default adapter reads the MLflow registry. Both ports stay injectable
+so the service remains unit testable without MLflow, a database, or a trained
+model.
 
-Two inherited limitations are surfaced rather than hidden:
+Two limitations are surfaced rather than hidden:
 
-* ``SimplePredictor`` applies a clipped level-calibration to its output. Only its
-  point forecasts are consumed here -- its heuristic interval is deliberately not
-  reused -- and a warning is attached to every response it backs.
+* The pipeline is a point estimator with no native quantiles, so intervals here
+  are residual-derived and labelled as such.
 * Only checkpoint *metadata* is persisted. Comparing a scenario against a stored
   baseline will need the points persisted too; that is a follow-up, so a reused
   ``baseline_forecast_id`` currently identifies a baseline rather than replaying
@@ -295,56 +294,27 @@ class MlflowModelResolver:
             return {}
 
 
-class ExistingStackPredictor:
+class CanonicalForecastPredictor:
     """
-    ``ModelPredictor`` adapter over the existing inference stack.
+    ``ModelPredictor`` adapter over the platform's one forecasting pipeline.
 
-    Delegates to ``ui.utils.simple_model_loader.SimpleModelLoader`` and
-    ``ui.utils.simple_predictor.SimplePredictor`` -- the same feature engineering
-    and prediction code the Streamlit app uses -- without modifying either.
+    Delegates to ``ForecastService.project``, which is the same code the
+    ``POST /v1/forecast`` endpoint runs: the same registry lookup, the same
+    artifact load, the same feature contract, and the same recursion. A baseline
+    produced here and a forecast produced there are therefore the same number,
+    which is the point -- when this adapter had its own copy of the feature
+    engineering (via ``ui.utils.simple_predictor``), the two could and did
+    disagree, because that copy substituted out-of-distribution constants for
+    the model's same-day inputs and then multiplied its output by a clipped
+    correction factor.
 
-    Only point forecasts are consumed. The stack exposes no quantile predictions,
-    so ``supports_quantiles`` is False and the caller derives residual-based
-    intervals instead of reusing the stack's heuristic band.
+    Only point forecasts are consumed. The pipeline exposes no quantile
+    predictions, so ``supports_quantiles`` is False and the caller derives
+    residual-based intervals instead.
     """
 
-    def __init__(
-        self,
-        model_type: str = DEFAULT_MODEL_TYPE,
-        repo_root: Optional[str] = None,
-    ) -> None:
+    def __init__(self, model_type: str = DEFAULT_MODEL_TYPE) -> None:
         self.model_type = model_type
-        self.repo_root = repo_root or os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-
-    def _load_stack(self, model: ResolvedModel) -> Any:
-        """Import and warm the existing loader for the resolved run."""
-        import sys
-
-        if self.repo_root not in sys.path:
-            sys.path.insert(0, self.repo_root)
-
-        try:
-            from ui.utils.simple_model_loader import SimpleModelLoader
-            from ui.utils.simple_predictor import SimplePredictor
-        except Exception as exc:  # noqa: BLE001 - surfaced as a structured error
-            raise BaselineForecastError(
-                BaselineForecastErrorCode.PREDICTION_FAILED,
-                "The existing inference stack could not be imported.",
-                details={"error": str(exc)},
-            ) from exc
-
-        loader = SimpleModelLoader()
-        run_id = model.run_id or loader.get_latest_run()
-        if not run_id or not loader.load_models_from_run(run_id):
-            raise BaselineForecastError(
-                BaselineForecastErrorCode.PREDICTION_FAILED,
-                "No model artifacts could be loaded for this model version.",
-                field_name="model_version",
-                details={"model_version": model.model_version, "run_id": run_id},
-            )
-        return SimplePredictor(loader)
 
     def predict(
         self,
@@ -355,25 +325,40 @@ class ExistingStackPredictor:
         confidence_levels: Sequence[float],
         model: ResolvedModel,
     ) -> PredictionResult:
-        """Run the existing stack and return its point forecasts."""
-        import pandas as pd
+        """Run the canonical pipeline and return its point forecasts."""
+        from api.services.feature_service import LEAKAGE_WARNING
+        from api.services.forecast_service import ForecastService
+        from api.services.model_registry_service import ResolvedModelVersion
 
-        predictor = self._load_stack(model)
-        frame = pd.DataFrame(
-            [
-                {
-                    "date": point.date,
-                    "store_id": point.store_id or store_id,
-                    "sales": float(point.sales),
-                }
-                for point in history
-            ]
+        # The scenario schemas carry their own `ResolvedModel`; the forecast
+        # pipeline wants the registry's type. They describe the same version, so
+        # this is a projection rather than a second lookup.
+        resolved = ResolvedModelVersion(
+            model=self.model_type,
+            registered_model_name="",
+            version=model.model_version,
+            stage=model.model_stage,
+            run_id=model.run_id,
         )
 
-        try:
-            result = predictor.predict(
-                frame, model_type=self.model_type, forecast_days=horizon_days
+        observations = [
+            _ForecastHistoryPoint(
+                date=point.date,
+                sales=float(point.sales),
+                customer_traffic=point.customer_traffic,
             )
+            for point in history
+        ]
+
+        try:
+            projection = ForecastService().project(
+                resolved=resolved,
+                history=observations,
+                store_id=store_id,
+                horizon_days=horizon_days,
+            )
+        except BaselineForecastError:
+            raise
         except Exception as exc:  # noqa: BLE001 - surfaced as a structured error
             raise BaselineForecastError(
                 BaselineForecastErrorCode.PREDICTION_FAILED,
@@ -381,19 +366,36 @@ class ExistingStackPredictor:
                 details={"error": str(exc)},
             ) from exc
 
-        if not result.get("success"):
-            raise BaselineForecastError(
-                BaselineForecastErrorCode.PREDICTION_FAILED,
-                "Baseline prediction failed.",
-                details={"error": result.get("error", "unknown prediction error")},
-            )
-
-        predictions = [float(value) for value in result["predictions"]["predicted_sales"]]
         return PredictionResult(
-            predictions=predictions,
+            predictions=[value for _, value in projection.predictions],
             supports_quantiles=False,
-            warnings=[CALIBRATION_WARNING],
+            warnings=[*projection.warnings, LEAKAGE_WARNING],
         )
+
+
+@dataclass
+class _ForecastHistoryPoint:
+    """
+    One observed day in the shape the feature builder reads.
+
+    A small adapter rather than constructing the forecast endpoint's pydantic
+    model: the builder reads attributes duck-typed, and going through the schema
+    would re-run validation the scenario layer has already performed.
+    """
+
+    date: date
+    sales: float
+    store_id: Optional[str] = None
+    quantity_sold: Optional[float] = None
+    profit: Optional[float] = None
+    customer_traffic: Optional[float] = None
+    has_promotion: Optional[bool] = None
+
+
+#: Retained name: the baseline service and any existing configuration refer to
+#: this adapter, and the class it points at is a strict improvement on what it
+#: used to be.
+ExistingStackPredictor = CanonicalForecastPredictor
 
 
 class BaselineForecastService:

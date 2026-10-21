@@ -145,32 +145,35 @@ services:
     image: python:3.11-slim
     platform: linux/arm64
     working_dir: /app
-    command: >
-      bash -c "
-      apt-get update && apt-get install -y libgomp1 build-essential cmake &&
-      pip install --no-cache-dir streamlit==1.29.0 pandas==2.1.4 numpy==1.24.3 scikit-learn==1.3.2 matplotlib==3.8.2 seaborn==0.13.0 plotly==5.18.0 mlflow==2.9.2 boto3==1.34.14 lightgbm==4.2.0 catboost==1.2.2 xgboost==2.0.3 &&
-      chmod +x /app/entrypoint.sh &&
-      /app/entrypoint.sh
-      "
+    # Dependency pins live in ui/entrypoint.sh, which is the single place they
+    # are declared; installing them here as well would let the two drift.
+    # The console is an API client now, so the heavy ML stack (mlflow, xgboost,
+    # lightgbm, boto3) is no longer installed at all.
+    command: ['bash', '-lc', 'chmod +x /app/entrypoint.sh && /app/entrypoint.sh']
     ports:
       - '8501:8501'
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow:5001
-      - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
-      - AWS_ACCESS_KEY_ID=minioadmin
-      - AWS_SECRET_ACCESS_KEY=minioadmin
-      - AWS_DEFAULT_REGION=us-east-1
+      # The ML Operations Console now reaches models through the API only. No
+      # MLflow, MinIO, or AWS credentials are provided here, which is what
+      # makes direct artifact access impossible rather than merely discouraged.
+      - FORECAST_API_URL=http://api:8000
     volumes:
       - ./ui:/app
-      - ./include:/usr/local/airflow/include:ro
     depends_on:
-      mlflow:
+      api:
         condition: service_started
     healthcheck:
-      test: ['CMD-SHELL', 'curl -fsS http://localhost:8501/_stcore/health || exit 1']
+      # Probed with the interpreter, not curl: this service runs
+      # python:3.11-slim, which has no curl. The previous `curl -fsS` probe
+      # could only ever fail ("curl: not found"), so the container reported
+      # unhealthy the whole time it was serving correctly.
+      test:
+        - CMD-SHELL
+        - python -c "import urllib.request; urllib.request.urlopen('http://localhost:8501/_stcore/health')"
       interval: 30s
       timeout: 10s
       retries: 5
+      # The console pip-installs its dependencies at boot.
       start_period: 180s
     networks:
       - airflow
@@ -181,7 +184,6 @@ services:
   # A separate database from MLflow's: scenario tables are application state
   # with their own lifecycle, and sharing MLflow's store would couple the two.
   scenario-db:
-    profiles: ['api', 'frontend']
     image: postgres:16-alpine
     platform: linux/arm64
     environment:
@@ -200,22 +202,34 @@ services:
       - default
     restart: unless-stopped
 
-  # FastAPI serving layer: Scenario Planner endpoints, health, and metrics.
+  # FastAPI serving layer: forecasts, model discovery, health, and metrics.
   #
-  # Profile-gated so `astro dev start` keeps working without building this
-  # image. Start it with:  docker compose --profile api up scenario-api
-  scenario-api:
-    profiles: ['api']
+  # Every model load and every prediction happens in this process. The browser
+  # and the Streamlit console both reach models only through it, which is why
+  # no MLflow or MinIO credential is given to either of them.
+  api:
+    # An explicit image tag, plus `pull_policy: build`.
+    #
+    # Without the tag, Compose derives one from the project name, which the
+    # Astro CLI suffixes with a hash of `.env` -- so editing `.env` would change
+    # the expected image name and `astro dev start` would fail with
+    # "No such image". Without `pull_policy: build`, the CLI's `up` does not
+    # build a service that has a `build:` section, so the first start fails for
+    # the same reason. Together they make the image name stable and build it on
+    # demand.
+    image: ${API_IMAGE:-sales-forecasting-api:latest}
+    pull_policy: build
     build:
       context: .
       dockerfile: api/Dockerfile
     platform: linux/arm64
     ports:
-      # Host port is configurable: 8000 is commonly taken by other local
-      # projects, and a hard mapping makes the whole stack fail to start.
-      - '${SCENARIO_API_PORT:-8008}:8000'
+      # 8000 is the documented port. It is overridable because it is commonly
+      # taken by another local project, and a hard mapping would make the whole
+      # stack fail to start.
+      - '${API_PORT:-8000}:8000'
     environment:
-      # Service discovery
+      # Service discovery, by Docker service name.
       - MLFLOW_TRACKING_URI=http://mlflow:5001
       - MLFLOW_S3_ENDPOINT_URL=http://minio:9000
       - MLFLOW_EXPERIMENT_NAME=sales_forecasting
@@ -223,20 +237,32 @@ services:
       - AWS_SECRET_ACCESS_KEY=${MINIO_ROOT_PASSWORD:-minioadmin}
       - AWS_DEFAULT_REGION=us-east-1
       - SCENARIO_DATABASE_URL=postgresql+psycopg2://${SCENARIO_DB_USER:-scenario}:${SCENARIO_DB_PASSWORD:-scenario}@scenario-db:5432/${SCENARIO_DB_NAME:-scenario}
-      # Scenario feature flags
+      # Model resolution
+      - MLFLOW_REGISTERED_MODEL_PREFIX=${MLFLOW_REGISTERED_MODEL_PREFIX:-sales_forecast_models_}
+      - FORECAST_MODELS=${FORECAST_MODELS:-ensemble,xgboost,lightgbm}
+      - FORECAST_DEFAULT_MODEL=${FORECAST_DEFAULT_MODEL:-ensemble}
+      - FORECAST_REQUIRE_PRODUCTION_STAGE=${FORECAST_REQUIRE_PRODUCTION_STAGE:-true}
+      # Forecast bounds
+      - FORECAST_MIN_HISTORY_DAYS=${FORECAST_MIN_HISTORY_DAYS:-30}
+      - FORECAST_MAX_HORIZON_DAYS=${FORECAST_MAX_HORIZON_DAYS:-90}
+      - FORECAST_PROFIT_TO_SALES_RATIO=${FORECAST_PROFIT_TO_SALES_RATIO:-0.3}
+      # Browser origins allowed to call this API.
+      - API_CORS_ALLOW_ORIGINS=${API_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      # Scenario Planner feature flags
       - SCENARIO_ENABLED_TYPES=${SCENARIO_ENABLED_TYPES:-promotion,traffic,closure,holiday,price,custom}
-      # The training DAG's promotion step does not currently populate the
-      # registry, so the strict Production check is relaxed for local runs.
-      - BASELINE_REQUIRE_PRODUCTION_STAGE=${BASELINE_REQUIRE_PRODUCTION_STAGE:-false}
+      - BASELINE_REQUIRE_PRODUCTION_STAGE=${BASELINE_REQUIRE_PRODUCTION_STAGE:-true}
       - BASELINE_RESIDUAL_HORIZON_SCALING=${BASELINE_RESIDUAL_HORIZON_SCALING:-true}
       - BASELINE_FORECAST_TTL_HOURS=${BASELINE_FORECAST_TTL_HOURS:-24}
       - FEATURE_SCHEMA_ARTIFACT_PATH=${FEATURE_SCHEMA_ARTIFACT_PATH:-feature_schema.json}
       - DATASET_REGISTRY_PATH=/usr/local/airflow/data/raw
-      - SCENARIO_AUDIT_REQUIRED_ROLE=${SCENARIO_AUDIT_REQUIRED_ROLE:-}
+      - MODEL_CACHE_DIR=/app/.cache/models
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
     volumes:
       # Read-only: the API reads dataset manifests for lineage, never writes.
       - ./data:/usr/local/airflow/data:ro
+      # Downloaded model artifacts survive a restart, so the first forecast
+      # after a redeploy does not re-fetch them from the object store.
+      - api-model-cache:/app/.cache/models
     depends_on:
       scenario-db:
         condition: service_healthy
@@ -249,29 +275,29 @@ services:
       - default
     restart: unless-stopped
 
-  # Next.js Scenario Planner UI.
+  # Next.js web application: the Forecast Console and the Scenario Planner.
   #
-  # Behind a profile because the frontend has no `next` dependency installed
-  # yet, so it would fail to start by default. Enable with:
-  #   docker compose --profile frontend up frontend
+  # Runs the dev server against a bind mount, which is what makes an edit on the
+  # host show up without a rebuild. For a production image, build the app and
+  # serve `next start` instead.
   frontend:
-    profiles: ['frontend']
     image: node:22-alpine
     platform: linux/arm64
     working_dir: /app
     command: sh -c "npm install && npm run dev -- --hostname 0.0.0.0 --port 3000"
     ports:
-      - '${FRONTEND_PORT:-3001}:3000'
+      - '${FRONTEND_PORT:-3000}:3000'
     environment:
-      # Server-side only. The browser never receives backend credentials; it
-      # talks to the API through this origin.
-      - NEXT_PUBLIC_API_BASE_URL=${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      # This is the URL the *browser* uses, so it must be reachable from the
+      # host, not a Docker service name. It carries no credentials -- the API is
+      # the only backend the browser ever talks to.
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-http://localhost:8000}
       - NODE_ENV=development
     volumes:
       - ./frontend:/app
       - frontend-node-modules:/app/node_modules
     depends_on:
-      - scenario-api
+      - api
     networks:
       - airflow
       - default
@@ -282,3 +308,4 @@ volumes:
   minio-data:
   scenario-db-volume:
   frontend-node-modules:
+  api-model-cache:

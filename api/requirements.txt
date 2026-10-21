@@ -8,5 +8,29 @@ psycopg2-binary==2.9.10
 pandas==2.2.3
 pyyaml==6.0.2
 # Read-only MLflow access: model registry lookups and artifact downloads.
+# Pinned to 2.x to match the 2.9.2 tracking server: the 3.x client routes
+# registry and artifact calls through /logged-models endpoints the server does
+# not expose, which fails silently (an empty model list) rather than loudly.
 mlflow==2.19.0
 boto3==1.35.84
+
+# Model loading and inference. Versions must match those the training image
+# used to fit and pickle the artifacts, or the estimators will not unpickle:
+#   xgboost 3.4.1, lightgbm 4.7.0, scikit-learn 1.9.1, numpy 1.26.4, joblib 1.6.0
+scikit-learn==1.9.1
+# `xgboost-cpu`, not `xgboost`: the GPU-enabled distribution declares
+# `nvidia-nccl-cu13` as a dependency (a 305 MB wheel) that this CPU-only
+# serving container can never use. It installs the same `xgboost` module at the
+# same version, so the pickled `xgboost.sklearn.XGBRegressor` loads unchanged.
+xgboost-cpu==3.4.1
+lightgbm==4.7.0
+numpy==1.26.4
+joblib==1.6.0
+scipy==1.17.1
+# `dill` and `cloudpickle` are needed to read the training artifacts: the
+# scalers were written with dill and the ensemble with cloudpickle.
+dill==0.3.1.1
+cloudpickle==3.1.2
+# The training feature pipeline derives `is_holiday` from the US public-holiday
+# calendar, so inference must reproduce it from the same source.
+holidays==0.60

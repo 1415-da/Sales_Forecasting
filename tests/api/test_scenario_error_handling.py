@@ -189,7 +189,9 @@ def test_request_ids_are_prefixed_and_unique():
         ("MODEL_VERSION_NOT_FOUND", "MODEL_NOT_FOUND"),
         ("MODEL_NOT_IN_PRODUCTION", "MODEL_NOT_IN_PRODUCTION"),
         ("MLFLOW_UNAVAILABLE", "MLFLOW_UNAVAILABLE"),
-        ("INSUFFICIENT_HISTORY", "SCENARIO_VALIDATION_ERROR"),
+        # The taxonomy gained a dedicated code for this so the forecast UI
+        # can offer "add more history" guidance; the status stays 422.
+        ("INSUFFICIENT_HISTORY", "INSUFFICIENT_HISTORY"),
         ("PREDICTION_FAILED", "PREDICTION_FAILED"),
         ("DATABASE_NOT_CONFIGURED", "DATABASE_UNAVAILABLE"),
         ("CHECKPOINT_NOT_FOUND", "BASELINE_NOT_FOUND"),

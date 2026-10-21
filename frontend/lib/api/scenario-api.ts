@@ -44,11 +44,18 @@ export const COMPARISON_TIMEOUT_MS = 60_000;
 
 const SCENARIO_BASE_PATH = '/v1/scenario';
 
-/** Resolve the API origin from the environment, defaulting to a same-origin proxy. */
+/**
+ * Resolve the API origin from the environment, defaulting to a same-origin proxy.
+ *
+ * `NEXT_PUBLIC_API_URL` is the documented variable; the two older names are
+ * still honoured so an existing local `.env` keeps working.
+ */
 function defaultBaseUrl(): string {
   const fromEnv =
     typeof process !== 'undefined'
-      ? process.env?.NEXT_PUBLIC_API_BASE_URL ?? process.env?.API_BASE_URL
+      ? process.env?.NEXT_PUBLIC_API_URL ??
+        process.env?.NEXT_PUBLIC_API_BASE_URL ??
+        process.env?.API_BASE_URL
       : undefined;
   return (fromEnv ?? '').replace(/\/+$/, '');
 }

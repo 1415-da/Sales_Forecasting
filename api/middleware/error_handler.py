@@ -27,6 +27,7 @@ from api.core.errors import (
     IdempotencyKeyConflictError,
     ScenarioErrorCode,
     ScenarioPlannerError,
+    ScenarioValidationError,
     new_request_id,
     normalize_error,
     utc_timestamp,
@@ -207,14 +208,78 @@ def install_error_handlers(app: Any) -> Any:
             headers={REQUEST_ID_HEADER: request_id},
         )
 
+    async def handle_request_validation(request: Any, exc: BaseException) -> Any:
+        """
+        Render a schema-level 422 in the same envelope as everything else.
+
+        Without this, FastAPI's default handler answers with its own
+        ``{"detail": [...]}`` shape, so a malformed body and a rejected business
+        rule -- both 422 -- would reach the client as two different contracts
+        and the frontend would need two parsers.
+        """
+        request_id = (
+            getattr(getattr(request, "state", None), "request_id", None)
+            or get_request_id()
+            or new_request_id()
+        )
+        error = ScenarioValidationError(
+            "The request failed validation.",
+            field=_first_invalid_field(exc),
+            details={"fields": _validation_field_errors(exc)},
+        )
+        log_exception(error, request_id, path=str(getattr(request, "url", "")))
+        return JSONResponse(
+            status_code=error.status_code,
+            content=error.to_error_payload(
+                request_id=request_id, timestamp=utc_timestamp(), safe=True
+            ),
+            headers={REQUEST_ID_HEADER: request_id},
+        )
+
     app.add_exception_handler(ScenarioPlannerError, handle)
 
     for error_type in _service_error_types():
         app.add_exception_handler(error_type, handle)
 
+    try:
+        from fastapi.exceptions import RequestValidationError
+
+        app.add_exception_handler(RequestValidationError, handle_request_validation)
+    except Exception as exc:  # noqa: BLE001 - optional wiring
+        logger.debug("Skipping request-validation handler: %s", exc)
+
     app.add_exception_handler(Exception, handle)
     app.add_middleware(RequestIdMiddleware)
     return app
+
+
+def _validation_field_errors(exc: BaseException) -> Dict[str, str]:
+    """
+    Flatten pydantic's validation errors to ``{"field path": "message"}``.
+
+    Only the location and the message are kept. The ``input`` pydantic attaches
+    is the caller's own payload echoed back, which bloats the response and can
+    contain values the caller did not intend to see repeated.
+    """
+    raw = getattr(exc, "errors", None)
+    if not callable(raw):
+        return {}
+    flattened: Dict[str, str] = {}
+    try:
+        for item in raw():
+            location = ".".join(
+                str(part) for part in item.get("loc", ()) if part != "body"
+            )
+            flattened[location or "body"] = str(item.get("msg", "invalid value"))
+    except Exception as nested:  # noqa: BLE001 - detail is best-effort
+        logger.debug("Could not flatten validation errors: %s", nested)
+    return flattened
+
+
+def _first_invalid_field(exc: BaseException) -> Optional[str]:
+    """The first offending field path, for the envelope's ``field``."""
+    fields = _validation_field_errors(exc)
+    return next(iter(fields), None)
 
 
 def _service_error_types() -> tuple:

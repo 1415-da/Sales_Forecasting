@@ -27,7 +27,14 @@
       "@/*": [
         "./*"
       ]
-    }
+    },
+    "allowJs": true,
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ]
   },
   "include": [
     "lib/**/*.ts",
@@ -40,7 +47,8 @@
     "app/**/*.tsx",
     "tests/**/*.ts",
     "tests/**/*.tsx",
-    "*.ts"
+    "*.ts",
+    ".next/types/**/*.ts"
   ],
   "exclude": [
     "node_modules"
