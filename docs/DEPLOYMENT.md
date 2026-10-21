@@ -40,7 +40,35 @@ astro dev start
 ```
 
 `astro dev start` builds the API image and brings up every service in
-`docker-compose.override.yml` alongside Airflow.
+`docker-compose.override.yml` alongside Airflow. This is the supported path.
+
+### Without the Astro CLI
+
+`docker-compose.yml` is the base file the Astro CLI otherwise supplies in
+memory — the `airflow` network, Airflow's metadata database, and the four
+Airflow components, whose entries in `docker-compose.override.yml` carry only
+volumes and environment. It exists because an override is never a project on
+its own: before it, every plain `docker compose …` in this directory failed
+with `no configuration file provided: not found`.
+
+```bash
+docker compose up -d                      # application stack only
+docker compose --profile airflow up -d    # the whole platform, Astro-free
+docker compose config                     # validate the merged YAML
+docker compose ps / logs -f api
+```
+
+Airflow sits behind the `airflow` profile, so `docker compose up` starts the
+application stack (api, frontend, scenario-db, mlflow, mlflow-db, minio, redis,
+streamlit) and leaves Airflow alone. Under the profile, `airflow-init` migrates
+the metadata database once and the components wait for it to succeed, the UI is
+published on `AIRFLOW_PORT` (8080 by default, rather than the drifting port the
+Astro CLI assigns), and `AIRFLOW_DB_*`, `AIRFLOW_SECRET_KEY`,
+`AIRFLOW_JWT_SECRET`, and `AIRFLOW_FERNET_KEY` configure it.
+
+**Do not run both at once.** They are separate Compose projects, but the
+override publishes 5001, 9000, 9001, and 8501 on fixed host ports, so the
+second stack to start loses those bindings.
 
 ### When 3000 or 8000 are already taken
 
@@ -442,6 +470,9 @@ LIVE_API_URL=http://localhost:8000 LIVE_ADMIN_PASSWORD=… npm test -- live-api
 | API exits with `set JWT_SECRET_KEY` | required, no fallback. `echo "JWT_SECRET_KEY=$(openssl rand -base64 48)" >> .env`. |
 | Page loads but every request fails CORS | `API_CORS_ALLOW_ORIGINS` does not list the frontend's origin, or `NEXT_PUBLIC_API_URL` does not match `API_PORT`. All four move together. |
 | Sign-in appears to succeed, then immediately logs out | `COOKIE_SECURE=true` over plain HTTP — the browser drops the refresh cookie. Set `false` for local dev. |
+| `no configuration file provided: not found` | a plain `docker compose` command ran without a base file. `docker-compose.yml` now supplies one; if it is missing, the override alone is not a project. |
+| `docker compose config`: `service "scheduler" has neither an image nor a build context` | `docker-compose.yml` is missing or lost its Airflow service definitions. The override intentionally gives those services only volumes and environment. |
+| `docker compose --profile airflow build` fails with a uv/pip network timeout | transient registry timeout inside the Astro base image's dependency step. Re-run the build; layers are cached. |
 | `astro dev start`: `No such image: …-api:latest` | the image tag or `pull_policy` was changed. Compose needs the explicit `image: ${API_IMAGE:-sales-forecasting-api:latest}` **and** `pull_policy: build`; without both, the CLI's `up` does not build the service. |
 | Forecast returns `503 MODEL_NOT_AVAILABLE` | no version in Production. Promote one (§ 7), or set `FORECAST_REQUIRE_PRODUCTION_STAGE=false` to serve an unpromoted version — the response then warns about it. |
 | `/v1/models` returns an empty list | an MLflow client/server version split: `search_registered_models()` returns `[]` from a 3.x client against a 2.9.2 server. The service enumerates `FORECAST_MODELS` instead, so check those names and `MLFLOW_REGISTERED_MODEL_PREFIX` match what training registered. |

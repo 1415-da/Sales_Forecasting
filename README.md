@@ -91,6 +91,14 @@ astro dev start
 | Ops console | <http://localhost:8501> |
 | MinIO console | <http://localhost:9001> |
 
+Without the Astro CLI, plain Compose works too — `docker-compose.yml` is the
+base file the CLI otherwise supplies in memory, with Airflow behind a profile:
+
+```bash
+docker compose up -d                    # application stack only
+docker compose --profile airflow up -d  # the whole platform, Astro-free
+```
+
 **If 3000 or 8000 are taken**, all four variables move together — the browser's
 API URL must match the API's port, and the API's allowed origins must match the
 frontend's port:
@@ -507,6 +515,8 @@ frontend/
 ├── lib/            api · auth-store · rbac · types · format
 └── tests/
 
+docker-compose.yml           base: airflow network, metadata db, Airflow components
+docker-compose.override.yml  app services + Astro's Airflow volumes/env
 dags/               sales_forecast_training · sales_forecast_monitoring
 include/            training code, data providers, feature engineering
 ui/                 Streamlit ML Operations Console (API client only)

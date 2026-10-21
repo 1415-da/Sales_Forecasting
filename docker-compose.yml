@@ -1,0 +1,171 @@
+# Base Compose file.
+#
+# Why this file exists
+# --------------------
+# `docker-compose.override.yml` is an *override*: Compose never treats it as a
+# project on its own, so every plain `docker compose …` run in this directory
+# failed with "no configuration file provided: not found". The Astro CLI does
+# not have that problem because it generates its own base file in memory and
+# merges the override into it -- but that base is invisible to `docker compose`.
+#
+# This file is that missing base. It supplies exactly what the Astro CLI would
+# otherwise contribute: the `airflow` network, Airflow's metadata database, and
+# the four Airflow components, whose entries in the override carry only volumes
+# and environment (no image), because Astro was expected to provide the rest.
+#
+# What runs when
+# --------------
+#   astro dev start                      unchanged. The CLI ignores this file
+#                                        and uses its own base + the override.
+#   docker compose up -d                 the application stack only: api,
+#                                        frontend, scenario-db, mlflow,
+#                                        mlflow-db, minio, redis, streamlit.
+#                                        Airflow is held back by its profile.
+#   docker compose --profile airflow up -d   the whole platform, Astro-free.
+#
+# The Astro CLI remains the supported path for Airflow; the profile is a
+# fallback for a machine without the CLI, and it is what makes commands like
+# `docker compose config`, `ps`, and `logs` work here at all.
+#
+# Do not run this alongside `astro dev start`: the two are separate Compose
+# projects, but the override publishes 5001, 9000, 9001, and 8501 on fixed host
+# ports, so the second stack to start loses those bindings.
+
+services:
+  # --- Airflow metadata database --------------------------------------------
+  # Separate from both mlflow-db and scenario-db: Airflow owns its own schema
+  # and lifecycle, and sharing one would couple unrelated migrations.
+  postgres:
+    profiles: ['airflow']
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME:-postgres}
+    volumes:
+      - airflow-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${AIRFLOW_DB_USER:-postgres}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airflow
+    restart: unless-stopped
+
+  # --- One-shot schema migration --------------------------------------------
+  # Every component below waits for this to succeed. Without it each one races
+  # to migrate the same database on first boot.
+  airflow-init:
+    profiles: ['airflow']
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${AIRFLOW_IMAGE:-sales-forecasting-airflow:latest}
+    pull_policy: build
+    command: ['bash', '-lc', 'airflow db migrate']
+    environment: &airflow-env
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql://${AIRFLOW_DB_USER:-postgres}:${AIRFLOW_DB_PASSWORD:-postgres}@postgres:5432/${AIRFLOW_DB_NAME:-postgres}
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'False'
+      AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT: ${AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT:-120}
+      AIRFLOW__SCHEDULER__STANDALONE_DAG_PROCESSOR: 'true'
+      # Airflow 3 runs task execution through the API server rather than
+      # letting workers reach the database directly.
+      AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://api-server:8080/execution/
+      # Matches the Astro CLI's local setup: no login wall in front of a
+      # development Airflow. Put it behind a real auth manager before exposing
+      # the UI anywhere.
+      AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: 'True'
+      AIRFLOW__API__PORT: '8080'
+      AIRFLOW__API__BASE_URL: http://localhost:${AIRFLOW_PORT:-8080}
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-sales-forecasting-local}
+      AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:-sales-forecasting-local}
+      # Empty means Airflow does not encrypt stored connection secrets. Fine
+      # for a local stack that defines none; set a real key
+      # (`python -c "from cryptography.fernet import Fernet;
+      # print(Fernet.generate_key().decode())"`) anywhere else.
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:-}
+    volumes: &airflow-volumes
+      - ./dags:/usr/local/airflow/dags
+      - ./include:/usr/local/airflow/include
+      - ./plugins:/usr/local/airflow/plugins
+      - ./tests:/usr/local/airflow/tests
+      - ./airflow_settings.yaml:/usr/local/airflow/airflow_settings.yaml
+      - airflow-logs:/usr/local/airflow/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airflow
+    restart: 'no'
+
+  # --- Airflow components ---------------------------------------------------
+  # `./data` and the monitoring service-account credentials come from
+  # docker-compose.override.yml, which is merged on top of this file.
+  scheduler:
+    profiles: ['airflow']
+    image: ${AIRFLOW_IMAGE:-sales-forecasting-airflow:latest}
+    command: ['airflow', 'scheduler']
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow
+    restart: unless-stopped
+
+  api-server:
+    profiles: ['airflow']
+    image: ${AIRFLOW_IMAGE:-sales-forecasting-airflow:latest}
+    command: ['airflow', 'api-server']
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    ports:
+      # The Astro CLI assigns this port itself and it drifts off 8080; here it
+      # is explicit.
+      - '${AIRFLOW_PORT:-8080}:8080'
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow
+    restart: unless-stopped
+
+  dag-processor:
+    profiles: ['airflow']
+    image: ${AIRFLOW_IMAGE:-sales-forecasting-airflow:latest}
+    command: ['airflow', 'dag-processor']
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow
+    restart: unless-stopped
+
+  triggerer:
+    profiles: ['airflow']
+    image: ${AIRFLOW_IMAGE:-sales-forecasting-airflow:latest}
+    command: ['airflow', 'triggerer']
+    environment: *airflow-env
+    volumes: *airflow-volumes
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - airflow
+    restart: unless-stopped
+
+# The network the override's application services attach to. Declared here
+# because the Astro-generated base is what used to declare it.
+networks:
+  airflow:
+    driver: bridge
+
+volumes:
+  airflow-db-volume:
+  airflow-logs:
