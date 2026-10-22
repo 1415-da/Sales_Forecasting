@@ -419,6 +419,25 @@ services:
       - default
     restart: unless-stopped
 
+  # Public HTTPS entry point for the API, used by the Vercel-hosted frontend.
+  #
+  # A Cloudflare quick tunnel: no account or open port is needed, but the
+  # *.trycloudflare.com hostname is random and changes whenever this container
+  # is recreated. scripts/publish-tunnel.sh reads the current hostname from the
+  # logs and points the Vercel deployment's API_PROXY_TARGET at it.
+  #
+  # Only the API is published. Airflow, MLflow, and the MinIO console have no
+  # authentication of their own here, so they stay on localhost.
+  api-tunnel:
+    image: cloudflare/cloudflared:2025.10.0
+    command: ['tunnel', '--no-autoupdate', '--url', 'http://api:8000']
+    depends_on:
+      - api
+    networks:
+      - airflow
+      - default
+    restart: unless-stopped
+
 volumes:
   mlflow-db-volume:
   minio-data:

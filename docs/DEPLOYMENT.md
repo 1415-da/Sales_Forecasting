@@ -4,6 +4,7 @@ How to run the platform, configure it, create the first administrator, harden
 it, and keep its data.
 
 - [1. Prerequisites](#1-prerequisites)
+- [Deploy the frontend to Vercel](#deploy-the-frontend-to-vercel)
 - [2. Start the stack](#2-start-the-stack)
 - [3. Services and ports](#3-services-and-ports)
 - [4. Environment variables](#4-environment-variables)
@@ -14,6 +15,62 @@ it, and keep its data.
 - [9. Persistence and backup](#9-persistence-and-backup)
 - [10. Verifying a deployment](#10-verifying-a-deployment)
 - [11. Troubleshooting](#11-troubleshooting)
+
+---
+
+## Deploy the frontend to Vercel
+
+Vercel can host the Next.js frontend. The FastAPI API and its PostgreSQL,
+MLflow, MinIO, and Airflow dependencies must be deployed separately on a
+reachable service with persistent storage; they are not part of a Vercel
+deployment.
+
+1. Deploy the API and dependencies first, and confirm its public HTTPS origin
+      is reachable (for example, `https://api.example.com`).
+2. Import the Git repository into Vercel. Set **Root Directory** to
+      `frontend` and leave the detected Next.js build settings unchanged.
+3. Add the environment variable `API_PROXY_TARGET` with the API origin only,
+      without a trailing path (for example, `https://api.example.com`). Set it for
+      Production and Preview environments, using the matching API for each.
+4. Do **not** set `NEXT_PUBLIC_API_URL` in Vercel. Leaving it unset makes the
+      browser use same-origin paths, and the Next.js rewrites proxy `/auth/*`,
+      `/v1/*`, and `/health` to `API_PROXY_TARGET`. This also keeps the refresh
+      cookie first-party; the backend should use `COOKIE_SECURE=true` and
+      `COOKIE_SAMESITE=lax`.
+5. Set the API's `API_CORS_ALLOW_ORIGINS` to the Vercel site origin(s), such as
+      `https://your-project.vercel.app` and any custom domain. Use exact origins,
+      with no trailing slash. Configure a strong `JWT_SECRET_KEY`, a persistent
+      production database, and the required model-registry/storage credentials on
+      the API host, never in Vercel's `NEXT_PUBLIC_*` variables.
+6. Deploy, then verify the site loads and `/health` works through the Vercel
+      origin. Sign-in and forecasts also require a provisioned database and a
+      Production model in the API's registry.
+
+### Serving the API from this machine through a tunnel
+
+Without a separate API host, the `api-tunnel` service in
+`docker-compose.override.yml` publishes the local API over HTTPS with a
+Cloudflare quick tunnel, and the Vercel project proxies to it. The live
+deployment is <https://sales-forecasting-mu.vercel.app> (Vercel project
+`sales-forecasting`, Root Directory `frontend`).
+
+- The site works only while this machine is awake and the stack is running.
+- The tunnel hostname (`*.trycloudflare.com`) changes whenever the
+  `api-tunnel` container is recreated, for example after `astro dev restart`.
+  Then run `scripts/publish-tunnel.sh`. It reads the new hostname, updates
+  `API_PROXY_TARGET` in Vercel, and redeploys production (about a minute;
+  requires `vercel login`).
+- Restarting only the `api` container keeps the hostname.
+- Airflow, MLflow, MinIO, and Streamlit are not tunnelled; they have no
+  authentication in this setup and stay on localhost.
+
+For a hostname that never changes, use a named Cloudflare tunnel on a domain
+you own and set `API_PROXY_TARGET` once.
+
+For Preview deployments, make sure the API CORS allowlist includes each preview
+origin you intend to use; wildcard origins are not appropriate for the
+credentialed API. Vercel hosts only the frontend and does not provide the
+persistent services required by the complete MLOps stack.
 
 ---
 
