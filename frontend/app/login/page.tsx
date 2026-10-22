@@ -10,7 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { POST_LOGIN_PATH, useAuth } from '@/hooks/use-auth';
-import { ApiError, friendlyMessage, getAuthConfig } from '@/lib/api';
+import { ApiError, friendlyMessage, loadAuthConfig } from '@/lib/api';
 
 /**
  * Sign-in page.
@@ -71,12 +71,14 @@ function LoginForm() {
   // rather than offering a form that can only ever fail.
   useEffect(() => {
     let cancelled = false;
-    getAuthConfig()
+    loadAuthConfig()
       .then((config) => {
         if (!cancelled) setRegistrationOpen(config.self_registration_enabled);
       })
       .catch(() => {
-        if (!cancelled) setRegistrationOpen(false);
+        // Unknown is not "disabled": keep the link, and let the sign-up page
+        // explain if the service is unreachable.
+        if (!cancelled) setRegistrationOpen(true);
       });
     return () => {
       cancelled = true;

@@ -137,7 +137,11 @@ export class ApiError extends Error {
    */
   get isRetryable(): boolean {
     if (this.kind === 'network' || this.kind === 'timeout') return true;
-    return this.status === 502 || this.status === 503 || this.status === 504;
+    // 530 is Cloudflare's "origin unreachable", returned while the API's
+    // tunnel is reconnecting.
+    return (
+      this.status === 502 || this.status === 503 || this.status === 504 || this.status === 530
+    );
   }
 }
 
@@ -236,7 +240,9 @@ export function friendlyMessage(error: unknown): string {
     return 'Something went wrong. Try again.';
   }
   if (error.kind === 'timeout') {
-    return 'The forecast took longer than 60 seconds and was cancelled. Try a shorter horizon.';
+    // A forecast normally returns in about a second, so a timeout far more
+    // often means the API is unreachable than that the horizon is too long.
+    return 'The server did not respond in time, so the request was cancelled. The service may be briefly unavailable; try again in a minute. If a forecast keeps timing out, try a shorter horizon.';
   }
   if (error.kind === 'network') {
     return 'Could not reach the forecast API. Check that it is running and try again.';
@@ -246,6 +252,10 @@ export function friendlyMessage(error: unknown): string {
   }
   if (error.code && ERROR_MESSAGES[error.code]) {
     return ERROR_MESSAGES[error.code] as string;
+  }
+  if (!error.code && error.isRetryable) {
+    // A gateway error with no API envelope: the proxy could not reach the API.
+    return 'The forecasting service is temporarily unreachable. Try again in a minute.';
   }
   return 'The request could not be completed.';
 }
@@ -475,6 +485,30 @@ export function createForecast(
 /** What the login page needs before anyone has signed in. */
 export function getAuthConfig(signal?: AbortSignal): Promise<AuthConfig> {
   return request('/auth/config', authConfigSchema, signal ? { signal } : {});
+}
+
+/** Pauses between `loadAuthConfig` attempts; one entry per retry. */
+export const AUTH_CONFIG_RETRY_DELAYS_MS = [1_000, 3_000] as const;
+
+/**
+ * `getAuthConfig`, retried on a transient failure.
+ *
+ * The sign-in and sign-up pages cannot render their options without it, and
+ * the first request after the API host wakes up is the one most likely to
+ * fail. A non-retryable error is rethrown at once.
+ */
+export async function loadAuthConfig(
+  delays: readonly number[] = AUTH_CONFIG_RETRY_DELAYS_MS,
+): Promise<AuthConfig> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await getAuthConfig();
+    } catch (error) {
+      const delay = delays[attempt];
+      if (delay === undefined || !(error instanceof ApiError) || !error.isRetryable) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+    }
+  }
 }
 
 /**

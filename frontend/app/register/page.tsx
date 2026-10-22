@@ -1,6 +1,6 @@
 'use client';
 
-import { Loader2, UserPlus } from 'lucide-react';
+import { Loader2, RefreshCw, UserPlus } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useEffect, useState } from 'react';
@@ -11,7 +11,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { POST_LOGIN_PATH, useAuth } from '@/hooks/use-auth';
-import { ApiError, friendlyMessage, getAuthConfig } from '@/lib/api';
+import { ApiError, friendlyMessage, loadAuthConfig } from '@/lib/api';
 import { ROLES, ROLE_DESCRIPTIONS, ROLE_LABELS, type Role } from '@/lib/rbac';
 import { cn } from '@/lib/utils';
 
@@ -52,6 +52,11 @@ function RegisterForm() {
   const loginHref = nextParam ? `/login?next=${encodeURIComponent(nextParam)}` : '/login';
 
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  // Whether the sign-up options have arrived. A failed load is not the same
+  // as registration being disabled: it usually means the API is briefly
+  // unreachable, and the form must not silently drop the role choice.
+  const [configState, setConfigState] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [configAttempt, setConfigAttempt] = useState(0);
   // Offered by the server, least privileged first. The server re-checks the
   // choice, so this list is presentation, not the control.
   const [offeredRoles, setOfferedRoles] = useState<Role[]>([]);
@@ -69,7 +74,8 @@ function RegisterForm() {
 
   useEffect(() => {
     let cancelled = false;
-    getAuthConfig()
+    setConfigState('loading');
+    loadAuthConfig()
       .then((config) => {
         if (cancelled) return;
         setEnabled(config.self_registration_enabled);
@@ -81,14 +87,15 @@ function RegisterForm() {
         setRole(
           offered.find((item) => item === fallback) ?? offered[0] ?? '',
         );
+        setConfigState('ready');
       })
       .catch(() => {
-        if (!cancelled) setEnabled(false);
+        if (!cancelled) setConfigState('error');
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [configAttempt]);
 
   const unmetRules = PASSWORD_RULES.filter((rule) => !rule.test(password));
 
@@ -96,6 +103,10 @@ function RegisterForm() {
     event.preventDefault();
     setError(null);
 
+    if (configState !== 'ready') {
+      setError('Sign-up options are still loading. Wait a moment, then try again.');
+      return;
+    }
     if (!fullName.trim() || !email.trim()) {
       setError('Enter your name and email address.');
       return;
@@ -185,7 +196,35 @@ function RegisterForm() {
               />
             </div>
 
-            {offeredRoles.length > 0 ? (
+            {configState === 'loading' ? (
+              <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />
+                Loading roles…
+              </p>
+            ) : null}
+
+            {configState === 'error' ? (
+              <div
+                role="alert"
+                className="space-y-2 rounded-md border border-destructive/50 p-3 text-sm"
+              >
+                <p className="text-destructive">
+                  Could not load the sign-up options. The service may be briefly
+                  unavailable.
+                </p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setConfigAttempt((value) => value + 1)}
+                >
+                  <RefreshCw aria-hidden="true" className="h-4 w-4" />
+                  Retry
+                </Button>
+              </div>
+            ) : null}
+
+            {configState === 'ready' && offeredRoles.length > 0 ? (
               <fieldset className="space-y-2">
                 <legend className="text-sm font-medium leading-none">Role</legend>
                 <div className="space-y-2 pt-1">
@@ -264,7 +303,11 @@ function RegisterForm() {
               </p>
             ) : null}
 
-            <Button type="submit" className="w-full" disabled={submitting}>
+            <Button
+              type="submit"
+              className="w-full"
+              disabled={submitting || configState !== 'ready'}
+            >
               {submitting ? (
                 <>
                   <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin" />

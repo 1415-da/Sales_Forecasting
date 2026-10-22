@@ -8,7 +8,7 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, friendlyMessage, getModels, createForecast } from '@/lib/api';
+import { ApiError, friendlyMessage, getModels, createForecast, loadAuthConfig } from '@/lib/api';
 import { addDays, formatSales, inclusiveDayCount, toIsoDate } from '@/lib/format';
 import {
   MIN_HISTORY_DAYS,
@@ -334,6 +334,23 @@ describe('friendlyMessage', () => {
       'shorter horizon',
     );
   });
+
+  it('says a timeout may mean the service is unreachable', () => {
+    expect(friendlyMessage(new ApiError('t', { kind: 'timeout' }))).toContain(
+      'briefly unavailable',
+    );
+  });
+
+  it('explains a gateway error without an envelope as the service being unreachable', () => {
+    for (const status of [502, 503, 504, 530]) {
+      const error = new ApiError('x', { kind: 'http', status });
+      expect(error.isRetryable).toBe(true);
+      expect(friendlyMessage(error)).toContain('temporarily unreachable');
+    }
+    expect(friendlyMessage(new ApiError('x', { kind: 'http', status: 500 }))).toBe(
+      'The request could not be completed.',
+    );
+  });
 });
 
 describe('request handling', () => {
@@ -377,6 +394,40 @@ describe('request handling', () => {
       field: 'history',
       requestId: 'req_deadbeef',
     });
+  });
+
+  it('retries the auth config after a gateway error', async () => {
+    const config = {
+      success: true,
+      self_registration_enabled: true,
+      password_min_length: 12,
+      roles: ['VIEWER'],
+      self_registration_roles: ['VIEWER'],
+      default_self_registration_role: 'VIEWER',
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('bad gateway', { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(config), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(loadAuthConfig([0])).resolves.toMatchObject({
+      self_registration_roles: ['VIEWER'],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up on the auth config once the retries are spent', async () => {
+    const fetchMock = vi.fn(async () => new Response('', { status: 530 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(loadAuthConfig([0, 0])).rejects.toMatchObject({ status: 530 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it('classifies a transport failure as retryable', async () => {
