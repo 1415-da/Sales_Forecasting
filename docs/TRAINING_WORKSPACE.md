@@ -31,38 +31,93 @@ ML Engineer
 
 Each has its own routes, permissions, validation and records. A training upload never becomes forecast history or monitoring actuals, and vice versa. The Forecast Console can *read* a store's recent days from a sealed training dataset (`GET /v1/training/datasets/{id}/history`), which returns recorded days as they are and generates nothing.
 
-## Accepted training schema (`store_day_v1`)
+## Ingestion path
 
-One row per store per calendar day. This is the grain the model is trained and served at; the M5 path also reduces product rows to store-day totals before training.
+Every upload goes through the same connected path:
+
+```
+upload (CSV / Parquet / several files / ZIP)
+  -> streamed to staging, hashed, originals stored write-once in MinIO
+  -> processing job (inline <= 2 MB, otherwise a bounded background worker)
+       package inspection   ZIP limits, path/symlink/nested-archive checks, content sniffing
+       adapter detection    evidence-based: exact / partial / manual; never a silent guess
+       confirmation         currency, policies, mapping (status needs_mapping until answered)
+       normalization        adapter -> canonical store_day_v1 frame + retained context
+       strict validation    store_day_v1 contract, rows, duplicates, readiness
+       append combination   when chosen
+       normalized Parquet + context Parquet stored separately (content-addressed)
+  -> confirm (seal)         only at the reviewed mapping version, warnings acknowledged
+  -> immutable version -> Airflow training request (manifest reference only)
+```
+
+Session statuses: `processing`, `needs_mapping`, `invalid` (a data rule failed), `validated`, `ready` (immutable), `failed` (a storage or processing failure; never a verdict on the data; **Retry processing** re-runs it from the stored originals). A restart marks interrupted jobs `failed` so they can be retried. Changing the adapter, mapping or policies bumps `mapping_version` and replaces the earlier validation; sealing an older view is refused.
+
+Detection does not mean acceptance: a recognised source still goes through the strict canonical validator.
+
+## Adapters
+
+| Adapter | Recognises | Maps |
+|---|---|---|
+| `canonical_store_day` v1 | A file with `date`, `store_id`, `sales` (case- and whitespace-insensitive) | Unchanged. SNAP derived for `CA_/TX_/WI_` stores, 25 December closure derived; extra columns refused (use the generic adapter to retain them). |
+| `rossmann` v1 | `train.csv`-like file with Store, Date, Sales plus Rossmann fields; optional `store.csv`; `test.csv` and `sample_submission.csv` excluded | `Store` -> `store_id` as `rossmann_<Store>` (text, never `1.0`; namespace `rossmann`); `Date` -> `date`; `Sales` -> `sales` (revenue); `Open` -> `is_closed = 1 - Open` (0/1 only, blanks are errors, never inferred from zero sales; overrides any closure calendar). SNAP and the US holiday feature are **not** applied. DayOfWeek, Customers, Promo, StateHoliday, SchoolHoliday and store metadata are retained as context, not model inputs, and enable no scenario. Without `Open`, a closure policy must be chosen. |
+| `mapped_tabular` v1 | Any single CSV/Parquet table | User maps date, store (or confirms a single named store), target, optional open/closed flag; must confirm target = revenue (quantity is refused), frequency = daily, grain = store-day (transaction/product rows are refused, never aggregated), currency, and a date format when dates are not ISO (ambiguous dates are never guessed). Unmapped columns are retained as context. |
+
+Not every dataset can be used. A recognised but unsupported shape is refused with what would be needed instead.
+
+### store.csv join
+
+One row per Store is required (`STORE_METADATA_DUPLICATES` otherwise). The join is validated many-to-one, and the row count before and after is reported; unmatched stores are listed. The metadata is retained as context only.
+
+## Canonical contract (`store_day_v1`)
 
 | Column | Required | Meaning |
 |---|---|---|
-| `date` | yes | Calendar day, `YYYY-MM-DD` (no time of day) |
+| `date` | yes | Calendar day, `YYYY-MM-DD` |
 | `store_id` | yes | Letters, digits, `_` or `-`, up to 64 characters |
-| `sales` | yes | Total daily revenue of the store, in the declared currency |
-| `snap_day` | no | 0/1. If omitted, it is derived from the state SNAP schedule for `CA_`, `TX_`, `WI_` stores (the same table serving uses). For any other store the feature is left out of training, not invented, so SNAP scenarios are not offered for that model. |
-| `is_closed` | no | 0/1. If omitted, it is derived from the platform closure calendar (25 December), which serving also applies. |
+| `sales` | yes | Total daily revenue of the store, in the confirmed currency |
+| `snap_day` | no | 0/1; derivation as per the adapter |
+| `is_closed` | no | 0/1; from the source, or a confirmed policy |
 
-Refused outright:
-- product-level rows (`product_id`, `item_id`, `sku`, `quantity_sold`, …); aggregate them first;
-- columns with no feature mapping;
-- pickle/joblib or any file that is not real CSV or Parquet (checked by magic bytes, not just the extension).
+Dataset metadata recorded in the manifest:
+- `source_namespace`, `target_type` (revenue), `currency` (ISO code or explicitly `UNKNOWN`), `frequency`, `schema_version` and `source_grain`;
+- the adapter id and version, and the mapping and its version;
+- the feature policies (`snap`, `closure`, `missing_dates`, `holiday_calendar`);
+- the transformations applied, and the retained columns.
 
-### Validation (each failure is reported with row numbers or per-store detail; nothing is silently dropped)
+**Currency.** Any ISO code, or an explicit `UNKNOWN`, can be trained. Only the serving currency (`TRAINING_ALLOWED_CURRENCIES`) can be **deployed** over the current model. The currency is never inferred from a country and never pre-selected.
 
-| Check | Rule |
+### Validation stages and issues
+
+The report tags every issue with `code`, `severity`, `stage` (file, detection, mapping, schema, rows, readiness, append, deployment), `file`, `column`, the affected count, examples with source row numbers, a message, and a suggested action. Row counts are `null`, and the UI says "Row validation not performed", when a schema or earlier stage stopped validation.
+
+| Rule | Behaviour |
 |---|---|
-| File | `.csv` or `.parquet`; at most `TRAINING_UPLOAD_MAX_BYTES` and `TRAINING_UPLOAD_MAX_ROWS` |
-| Target | `sales` numeric and finite; blank is an error (a day with no sales is `0`) |
-| Negative revenue | `TRAINING_NEGATIVE_SALES_POLICY`: `reject` (default) or `allow` (warning) |
-| Store scope | Identifier format; if `TRAINING_ALLOWED_STORES` is set, stores outside it are rejected |
-| Currency / frequency | Declared currency must be in `TRAINING_ALLOWED_CURRENCIES`; daily only |
-| Grain | Identical repeated store-days are collapsed (counted); conflicting ones are errors |
-| Missing dates | Any gap inside a store's range is an error; known zero-sales days must be rows with `0` |
-| History per store | ≥ `warm-up + 30` days, where warm-up is the longest lag/rolling window in `ml_config.yaml` (30), and that much before the validation window |
-| Dates for evaluation | ≥ 140 distinct dates: 70% train, 10% validation (≥ 14 days), 20% untouched test (≥ 28 days), split by **calendar date** |
+| Target | numeric and finite; blank -> `NULL_TARGET`; text -> `NON_NUMERIC_TARGET`; negative per `TRAINING_NEGATIVE_SALES_POLICY` |
+| Duplicates | identical store-days collapsed (`DUPLICATE_KEYS`, counted); differing -> `CONFLICTING_RECORDS`, checked across the whole file |
+| Missing dates | gaps inside a store's history -> `MISSING_DATES`, or the explicit `exclude_stores` policy (`STORES_EXCLUDED`, must be acknowledged before sealing; stores listed) |
+| History | each store >= warm-up (longest lag/window in `ml_config.yaml`, 30) + 30 days before the validation window -> `INSUFFICIENT_HISTORY` |
+| Evaluation window | >= 140 distinct dates, split by calendar date 70/10/20 -> `INSUFFICIENT_EVALUATION_WINDOW` |
+| Deployment preview | `DEPLOYMENT_DOMAIN_MISMATCH` warning when a model trained on the data could not replace the serving model (currency, store coverage); training is still allowed |
 
-The download button returns the full report as JSON.
+## Upload limits
+
+Configured in one place (`include/data_ingestion/limits.py`, overridable by environment) and shown on the upload card. The browser checks them before sending; the API enforces them while streaming (413 with the limit and alternatives); the inspector enforces the ZIP limits.
+
+| Limit | Default | Variable |
+|---|---|---|
+| Whole upload | 200 MB | `TRAINING_UPLOAD_MAX_BYTES` |
+| Any one file (incl. ZIP members) | 150 MB | `TRAINING_UPLOAD_MAX_FILE_BYTES` |
+| Files per upload | 10 | `TRAINING_UPLOAD_MAX_FILES` |
+| ZIP expanded size | 500 MB | `TRAINING_UPLOAD_MAX_EXPANDED_BYTES` |
+| ZIP compression ratio | 100:1 | `TRAINING_UPLOAD_MAX_COMPRESSION_RATIO` |
+| Rows after normalization | 5,000,000 | `TRAINING_UPLOAD_MAX_ROWS` |
+| Processing time per job | 900 s | `TRAINING_PROCESSING_TIMEOUT_SECONDS` |
+| Concurrent jobs | 2 | `TRAINING_MAX_CONCURRENT_JOBS` |
+| Processed inside the request | <= 2 MB | `TRAINING_INLINE_PROCESSING_BYTES` |
+
+**Rationale.** The Docker VM has 8 GB of memory, shared by every service. Rossmann's 38 MB, 1.0 M-row `train.csv` parses and validates in about 3 s and occupies under 1 GB while parsed. Columns are read as text and only the needed ones are loaded. Files are streamed to disk and to MinIO, never held whole in the request. Processing runs off the request so a browser or proxy timeout cannot cut it short, and the session can be reloaded at any time.
+
+**ZIPs.** These are refused: path traversal, absolute paths, symlinks, encrypted members, nested archives, executable or serialized members (`.pkl`, `.joblib`, `.py`, ...), nesting more than one folder deep, duplicate file names, and members whose content does not match their extension. OS metadata (`__MACOSX/`, `.DS_Store`, `._*`, `Thumbs.db`) is ignored via an allowlist. Other non-data files are listed as excluded.
 
 ## Dataset versions and combination
 
@@ -182,10 +237,10 @@ Viewers and Business Users do not see the tab. There is no per-user store scope 
 | Variable | Default | Purpose |
 |---|---|---|
 | `TRAINING_DATASET_BUCKET` | `training-datasets` | MinIO bucket for datasets (created on first use) |
-| `TRAINING_UPLOAD_MAX_BYTES` / `_MAX_ROWS` | 50 MB / 2,000,000 | Upload limits |
+| `TRAINING_UPLOAD_*`, `TRAINING_PROCESSING_TIMEOUT_SECONDS`, `TRAINING_MAX_CONCURRENT_JOBS`, `TRAINING_INLINE_PROCESSING_BYTES` | see Upload limits | Upload and processing limits |
 | `TRAINING_NEGATIVE_SALES_POLICY` | `reject` | Returns policy |
 | `TRAINING_ALLOWED_STORES` | empty (any) | Store scope |
-| `TRAINING_ALLOWED_CURRENCIES` | `USD` | Accepted currencies |
+| `TRAINING_ALLOWED_CURRENCIES` | `USD` | Serving currency: candidates in another currency cannot be deployed |
 | `AIRFLOW_API_URL` | `http://api-server:8080` | Airflow REST API (Docker service name) |
 | `AIRFLOW_API_USERNAME` / `_PASSWORD` | `admin` / `admin` | API's Airflow service credentials (backend only) |
 | `AIRFLOW_PUBLIC_URL` | `http://localhost:19382` | Browser link to runs |
