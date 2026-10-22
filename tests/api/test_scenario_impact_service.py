@@ -874,6 +874,52 @@ def test_supplied_baseline_is_reused_and_recomputation_is_disclosed():
     assert BASELINE_RECOMPUTED_WARNING in response.warnings
 
 
+def test_reused_baseline_without_a_run_id_resolves_it_from_the_version():
+    """
+    A checkpoint stores the model version but not its training run.
+
+    The real provider therefore returns ``run_id=None``; without resolving it,
+    every second run on the same store failed with "no training run".
+    """
+    from api.services.baseline_forecast_service import ResolvedModel
+    from api.services.scenario_forecast_service import ResolvedBaseline
+
+    class Resolver:
+        def __init__(self) -> None:
+            self.requested: list = []
+
+        def resolve(self, model_version: str, model=None) -> ResolvedModel:
+            self.requested.append(model_version)
+            return ResolvedModel(
+                model_version=model_version,
+                model_stage=ModelStage.PRODUCTION.value,
+                run_id="b" * 32,
+            )
+
+    resolver = Resolver()
+    baseline_service = FakeBaselineService()
+    baseline_service.model_resolver = resolver
+    resolved = ResolvedBaseline(
+        baseline_forecast_id="bf_existing",
+        model_version="14",
+        model_stage=ModelStage.PRODUCTION.value,
+        forecast_start_date=FORECAST_START,
+        forecast_end_date=FORECAST_END,
+        horizon_days=HORIZON_DAYS,
+        reused=True,
+    )
+    service = build_forecast_service(
+        baseline_provider=FakeBaselineProvider(resolved=resolved),
+        baseline_service=baseline_service,
+    )
+
+    response = service.create_comparison(build_request(baseline_forecast_id="bf_existing"))
+
+    assert resolver.requested == ["14"]
+    assert resolved.run_id == "b" * 32
+    assert response.baseline_reused is True
+
+
 def test_invalid_baseline_id_propagates_the_provider_error():
     from api.services.scenario_forecast_service import ScenarioComparisonErrorCode
 
@@ -926,3 +972,71 @@ def test_baseline_and_scenario_cover_identical_dates():
     assert response.baseline.end_date == response.scenario.end_date
     assert response.impact.dates[0] == FORECAST_START
     assert response.impact.dates[-1] == FORECAST_END
+
+
+# ---------------------------------------------------------------------------
+# Inert-lever disclosure
+# ---------------------------------------------------------------------------
+
+
+def _inertia(daily_rows, *, modified_dates, overrides=()):
+    from types import SimpleNamespace
+
+    from api.services.scenario_forecast_service import ScenarioForecastService
+
+    impact = SimpleNamespace(
+        daily_impacts=[
+            SimpleNamespace(date=day, baseline_forecast=base, daily_difference=diff)
+            for day, base, diff in daily_rows
+        ],
+        total_baseline_forecast=sum(base for _, base, _ in daily_rows),
+        total_difference=sum(diff for _, _, diff in daily_rows),
+    )
+    return ScenarioForecastService._with_inertia_warning(
+        warnings=[],
+        impact=impact,
+        modified_features=["is_holiday"],
+        applied_overrides=list(overrides),
+        modified_dates=list(modified_dates),
+    )
+
+
+def _summary(values):
+    from api.schemas.scenario_override import ValueSummary
+
+    return ValueSummary(count=len(values), dtype="float64", distinct=sorted(set(values)))
+
+
+def test_a_real_one_day_effect_on_a_long_horizon_is_not_called_inert():
+    """3% on one day of 60 is 0.05% of the total, but it is a real response."""
+    from api.services.scenario_forecast_service import INERT_LEVER_WARNING
+
+    days = [FORECAST_START + timedelta(days=offset) for offset in range(60)]
+    rows = [(day, 1000.0, 30.0 if offset == 36 else 0.0) for offset, day in enumerate(days)]
+    assert INERT_LEVER_WARNING not in _inertia(rows, modified_dates=[days[36]])
+
+
+def test_a_lever_the_model_ignores_on_its_own_days_is_called_inert():
+    from api.services.scenario_forecast_service import INERT_LEVER_WARNING
+
+    days = [FORECAST_START + timedelta(days=offset) for offset in range(7)]
+    rows = [(day, 1000.0, 0.0) for day in days]
+    assert INERT_LEVER_WARNING in _inertia(rows, modified_dates=days[:3])
+
+
+def test_an_override_that_changes_nothing_says_so_instead_of_blaming_the_model():
+    from types import SimpleNamespace
+
+    from api.services.scenario_forecast_service import (
+        INERT_LEVER_WARNING,
+        NO_EFFECTIVE_CHANGE_WARNING,
+    )
+
+    days = [FORECAST_START + timedelta(days=offset) for offset in range(7)]
+    rows = [(day, 1000.0, 0.0) for day in days]
+    noop = SimpleNamespace(
+        original_value_summary=_summary([0.0, 0.0]), new_value_summary=_summary([0.0, 0.0])
+    )
+    warnings = _inertia(rows, modified_dates=days[:2], overrides=[noop])
+    assert warnings == [NO_EFFECTIVE_CHANGE_WARNING]
+    assert INERT_LEVER_WARNING not in warnings

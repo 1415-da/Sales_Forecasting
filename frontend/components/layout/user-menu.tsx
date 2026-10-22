@@ -75,7 +75,7 @@ export function UserMenu() {
       {open ? (
         <div
           role="menu"
-          className="absolute right-0 z-30 mt-2 w-72 rounded-md border bg-popover p-1 shadow-lg"
+          className="absolute right-0 z-50 mt-2 w-72 rounded-md border bg-popover p-1 text-popover-foreground shadow-lg"
         >
           <div className="space-y-1 border-b px-3 py-3">
             <p className="truncate text-sm font-medium">{user.full_name}</p>

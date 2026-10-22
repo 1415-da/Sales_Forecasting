@@ -124,8 +124,16 @@ def install_cors(app: FastAPI, settings: Settings) -> None:
         CORSMiddleware,
         allow_origins=origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", "X-Request-ID", "Idempotency-Key"],
+        # PATCH is used by the admin user editor; Authorization carries the
+        # bearer token on every /v1 call. Omitting either fails the browser's
+        # preflight before the request is ever sent.
+        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-Request-ID",
+            "Idempotency-Key",
+        ],
         expose_headers=["X-Request-ID"],
     )
     logger.info("CORS enabled for origins: %s", ", ".join(origins))

@@ -274,7 +274,8 @@ class ForecastService:
         uncertainty = self._resolve_uncertainty(resolved, series.sales, predictions)
         bands = self._build_bands(predictions, request.confidence_level, uncertainty)
 
-        warnings.append(LEAKAGE_WARNING)
+        if projection.builder is not None and projection.builder.uses_same_day_columns:
+            warnings.append(LEAKAGE_WARNING)
         warnings.append(RECURSIVE_WARNING)
         warnings.extend(uncertainty.warnings)
         if not resolved.is_production:
@@ -340,7 +341,7 @@ class ForecastService:
 
         series = builder.read_history(history)
         warnings = builder.validate_history(series)
-        policy = builder.build_policy(series)
+        policy = builder.build_policy(series, store_id=store_id)
         store_code = builder.encode_store(store_id)
 
         rows: List[Dict[str, float]] = []
@@ -415,7 +416,7 @@ class ForecastService:
                 )
             value = max(0.0, value)
             results.append((target_date, value))
-            series.append(value)
+            series.append(carry_forward_value(builder, bundle, row, value))
 
         return results
 
@@ -492,6 +493,35 @@ def _summarise(bands: Sequence[DailyForecast]) -> ForecastSummary:
     )
 
 
+def carry_forward_value(
+    builder: FeatureBuilder,
+    bundle: ModelBundle,
+    row: Dict[str, float],
+    predicted: float,
+) -> float:
+    """
+    The value a forecast day contributes to later days' lag and rolling inputs.
+
+    Normally the prediction itself. On a closed day (``is_closed``) the store
+    sells nothing, but demand does not vanish for the weeks after: feeding a 0
+    into lag-1, lag-7 and every rolling window would drag the following weeks
+    down for no real reason. So a closed day is predicted as shown (near 0) but
+    carries forward what the model predicts for that day as if open. Both the
+    forecast and the scenario recursion use this, so they stay identical.
+    """
+    if row.get("is_closed", 0.0) < 0.5:
+        return predicted
+    open_row = dict(row, is_closed=0.0)
+    try:
+        raw = bundle.model.predict(builder.scale(builder.to_frame([open_row])))
+    except Exception:  # noqa: BLE001 - fall back to the shown value
+        return predicted
+    value = _first_scalar(raw)
+    if value is None or not math.isfinite(value):
+        return predicted
+    return max(0.0, value)
+
+
 def _first_scalar(value: Any) -> Optional[float]:
     """
     Extract a single float from whatever shape an estimator returned.
@@ -538,4 +568,5 @@ __all__ = [
     "RECURSIVE_WARNING",
     "Z_SCORES",
     "ForecastService",
+    "carry_forward_value",
 ]

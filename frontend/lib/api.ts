@@ -186,6 +186,8 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PERMISSION_DENIED: 'You do not have permission to perform this action.',
   REGISTRATION_DISABLED:
     'Self-registration is disabled. Ask an administrator for an account.',
+  ROLE_NOT_SELF_ASSIGNABLE:
+    'That role cannot be chosen at sign-up. Pick another, or ask an administrator.',
   EMAIL_ALREADY_REGISTERED: 'That email address is already registered.',
   WEAK_PASSWORD: 'That password does not meet the requirements.',
   RATE_LIMITED: 'Too many attempts. Wait a moment and try again.',
@@ -464,6 +466,8 @@ export async function register(payload: {
   email: string;
   full_name: string;
   password: string;
+  /** Requested role; the server grants it only if it is self-assignable. */
+  role?: string;
 }): Promise<TokenResponse> {
   const result = await request('/auth/register', tokenResponseSchema, {
     method: 'POST',

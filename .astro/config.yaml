@@ -1,2 +1,4 @@
+api-server:
+    port: "19382"
 project:
     name: sales-forecasting

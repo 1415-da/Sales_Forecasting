@@ -286,9 +286,13 @@ services:
       # refresh cookie is sent in the clear.
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
       - COOKIE_SAMESITE=${COOKIE_SAMESITE:-lax}
-      # Closed by default: an open sign-up form would let anyone reach the model.
-      - ALLOW_SELF_REGISTRATION=${ALLOW_SELF_REGISTRATION:-false}
-      - SELF_REGISTRATION_ROLE=${SELF_REGISTRATION_ROLE:-VIEWER}
+      # Open: new users sign up at /register. BUSINESS_USER can forecast and
+      # run scenarios but cannot change models or users.
+      - ALLOW_SELF_REGISTRATION=${ALLOW_SELF_REGISTRATION:-true}
+      - SELF_REGISTRATION_ROLE=${SELF_REGISTRATION_ROLE:-BUSINESS_USER}
+      # Roles the sign-up form lets a new user pick. ADMIN is left out on
+      # purpose; add it only for a private demo.
+      - SELF_REGISTRATION_ROLES=${SELF_REGISTRATION_ROLES:-VIEWER,BUSINESS_USER,ANALYST,ML_ENGINEER}
       - MAX_LOGIN_ATTEMPTS=${MAX_LOGIN_ATTEMPTS:-8}
       - LOGIN_LOCKOUT_MINUTES=${LOGIN_LOCKOUT_MINUTES:-15}
       - BCRYPT_ROUNDS=${BCRYPT_ROUNDS:-12}
@@ -325,7 +329,7 @@ services:
       # Browser origins allowed to call this API.
       - API_CORS_ALLOW_ORIGINS=${API_CORS_ALLOW_ORIGINS:-http://localhost:3001,http://127.0.0.1:3001}
       # Scenario Planner feature flags
-      - SCENARIO_ENABLED_TYPES=${SCENARIO_ENABLED_TYPES:-promotion,traffic,closure,holiday,price,custom}
+      - SCENARIO_ENABLED_TYPES=${SCENARIO_ENABLED_TYPES:-promotion,traffic,closure,holiday,price,snap,custom}
       - BASELINE_REQUIRE_PRODUCTION_STAGE=${BASELINE_REQUIRE_PRODUCTION_STAGE:-true}
       - BASELINE_RESIDUAL_HORIZON_SCALING=${BASELINE_RESIDUAL_HORIZON_SCALING:-true}
       - BASELINE_FORECAST_TTL_HOURS=${BASELINE_FORECAST_TTL_HOURS:-24}

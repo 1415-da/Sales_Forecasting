@@ -119,6 +119,8 @@ class ScenarioCapabilitiesResponse(BaseModel):
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
+    #: Model family the capabilities describe; ``None`` means the default.
+    model: Optional[str] = None
     model_version: str
     feature_schema_version: str = FEATURE_SCHEMA_VERSION
     run_id: Optional[str] = None

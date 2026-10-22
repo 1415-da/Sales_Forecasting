@@ -35,6 +35,7 @@ from utils.api_client import (  # noqa: E402  (path setup must precede the impor
     create_forecast,
     get_health,
     get_models,
+    login,
 )
 
 st.set_page_config(page_title="ML Operations Console", page_icon="🛠️", layout="wide")
@@ -77,6 +78,10 @@ if "history_source" not in st.session_state:
     st.session_state.history_source = None
 if "forecast" not in st.session_state:
     st.session_state.forecast = None
+# Per browser session: one Streamlit process serves every operator.
+if "access_token" not in st.session_state:
+    st.session_state.access_token = None
+    st.session_state.signed_in_as = None
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +109,51 @@ def render_api_failure(result: ApiResult, context: str) -> None:
             "The console reaches models only through the API. Start it with "
             "`docker compose up api`, then reload this page."
         )
+
+
+def require_session(result: ApiResult) -> None:
+    """
+    Drop an expired or revoked token so the sidebar asks for a fresh sign-in.
+
+    The console does not use the refresh cookie, so a 401 after sign-in means
+    the access token has run out.
+    """
+    if result.status_code == 401 and st.session_state.access_token:
+        st.session_state.access_token = None
+        st.session_state.signed_in_as = None
+        st.warning("Your session expired. Sign in again from the sidebar.")
+        st.stop()
+
+
+def render_sign_in() -> None:
+    """Sidebar sign-in. Every /v1 route requires a token; /health does not."""
+    with st.sidebar:
+        st.subheader("Account")
+        if st.session_state.access_token:
+            st.caption(f"Signed in as {st.session_state.signed_in_as}")
+            if st.button("Sign out", use_container_width=True):
+                st.session_state.access_token = None
+                st.session_state.signed_in_as = None
+                st.session_state.forecast = None
+                st.rerun()
+            return
+
+        with st.form("sign_in"):
+            email = st.text_input("Email")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Sign in", use_container_width=True)
+        if submitted:
+            result = login(email.strip(), password)
+            if result.ok:
+                user = result.payload.get("user") or {}
+                st.session_state.access_token = result.payload.get("access_token")
+                st.session_state.signed_in_as = (
+                    f"{user.get('email', email)} ({user.get('role', '?')})"
+                )
+                st.rerun()
+            else:
+                st.error(result.summary())
+        st.caption("Use the same account as the web app.")
 
 
 def build_sample_history(days: int, average: float, volatility_pct: int) -> pd.DataFrame:
@@ -155,8 +205,9 @@ st.caption(
     "everything below comes from the API."
 )
 
+render_sign_in()
+
 health = get_health()
-models_result = get_models()
 
 if not health.ok:
     render_api_failure(health, "Platform health unavailable")
@@ -210,6 +261,13 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 
 st.header("Registered models")
+
+if not st.session_state.access_token:
+    st.info("Sign in from the sidebar to see registered models and run a forecast.")
+    st.stop()
+
+models_result = get_models(token=st.session_state.access_token)
+require_session(models_result)
 
 if not models_result.ok:
     render_api_failure(models_result, "Model registry unavailable")
@@ -382,7 +440,9 @@ else:
                 horizon_days=int(horizon),
                 confidence_level=float(confidence),
                 history=history_payload(history_df, selected_store),
+                token=st.session_state.access_token,
             )
+        require_session(st.session_state.forecast)
 
 forecast_result: ApiResult | None = st.session_state.forecast
 
@@ -494,5 +554,5 @@ if forecast_result is not None and forecast_result.ok:
 st.markdown("---")
 st.caption(
     f"API: {api_base_url()} · The product-facing Forecast Console is the "
-    "Next.js app on port 3000."
+    "Next.js web app (http://localhost:3001 locally)."
 )

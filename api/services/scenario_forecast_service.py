@@ -28,6 +28,8 @@ from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checka
 
 import pandas as pd
 
+from api.config import get_settings
+
 from api.schemas.baseline_forecast import (
     BaselineDailyForecast,
     BaselineForecastCheckpoint,
@@ -72,22 +74,41 @@ BASELINE_RECOMPUTED_WARNING = (
     "Baseline forecast points are not persisted, so the baseline was recomputed "
     "from its checkpoint under the same baseline_forecast_id."
 )
-#: Fraction of the baseline total below which an impact is treated as
-#: indistinguishable from zero. Floating-point recursion leaves a residue of a
-#: few units on a 40,000-unit total; that is not an effect.
+#: Fraction of the baseline on the changed days below which an impact is
+#: treated as indistinguishable from zero. Measured on those days, not the whole
+#: horizon: a real one-day effect is a tiny share of a 60-day total.
 INERT_IMPACT_THRESHOLD = 0.001
 
 INERT_LEVER_WARNING = (
-    "The scenario changed the model's inputs but barely moved its output. The "
-    "feature it targets was effectively constant in this model's training data, "
-    "so the model has no fitted response to it. Read this as 'this model cannot "
-    "express that lever', not as 'the change would have no business effect'."
+    "The scenario changed the model's inputs but barely moved its forecast on "
+    "the days it changed. The model has learned little or no response to this "
+    "lever, so read this as 'this model cannot express that lever', not as 'the "
+    "change would have no business effect'."
+)
+
+NO_EFFECTIVE_CHANGE_WARNING = (
+    "The scenario set its inputs to the values they already had on those days "
+    "(for example, switching SNAP off on days that are not SNAP days), so the "
+    "forecast is unchanged."
 )
 
 UNSUPPORTED_OVERRIDE_WARNING = (
     "Some requested overrides were not applied because the model's feature schema "
     "does not contain them; the scenario is therefore partial."
 )
+
+
+def _override_is_noop(override: Any) -> bool:
+    """Whether an applied override left its feature's values unchanged."""
+    before = getattr(override, "original_value_summary", None)
+    after = getattr(override, "new_value_summary", None)
+    if before is None or after is None:
+        return False
+    if before.distinct is not None and after.distinct is not None:
+        return sorted(map(str, before.distinct)) == sorted(map(str, after.distinct)) and (
+            len(before.distinct) <= 1
+        )
+    return False
 
 
 class ScenarioComparisonErrorCode(str, Enum):
@@ -176,6 +197,8 @@ class ResolvedBaseline:
     reused: bool = False
     response: Optional[BaselineForecastResponse] = None
     checkpoint: Optional[BaselineForecastCheckpoint] = None
+    #: Model family; ``None`` means the deployment default.
+    model_name: Optional[str] = None
 
     @property
     def model(self) -> ResolvedModel:
@@ -184,6 +207,7 @@ class ResolvedBaseline:
             model_version=self.model_version,
             model_stage=self.model_stage,
             run_id=self.run_id,
+            model=self.model_name or get_settings().default_model,
         )
 
 
@@ -283,6 +307,7 @@ class CheckpointBaselineProvider:
             horizon_days=checkpoint.horizon_days,
             reused=True,
             checkpoint=checkpoint,
+            model_name=checkpoint.model or get_settings().default_model,
         )
 
     @staticmethod
@@ -291,6 +316,12 @@ class CheckpointBaselineProvider:
     ) -> None:
         """A baseline for another store or horizon is not a valid comparison base."""
         mismatches: Dict[str, Any] = {}
+        default_model = get_settings().default_model
+        if (checkpoint.model or default_model) != (request.model or default_model):
+            mismatches["model"] = {
+                "baseline": checkpoint.model or default_model,
+                "requested": request.model or default_model,
+            }
         if checkpoint.store_id != request.store_id:
             mismatches["store_id"] = {
                 "baseline": checkpoint.store_id,
@@ -448,6 +479,7 @@ class ScenarioForecastService:
             scenario_id=new_scenario_id(),
             baseline_forecast_id=baseline.baseline_forecast_id,
             scenario_forecast_id=new_scenario_forecast_id(),
+            model=baseline.model.model,
             model_version=baseline.model_version,
             model_stage=baseline.model_stage,
             scenario_type=request.scenario.scenario_type,
@@ -472,6 +504,8 @@ class ScenarioForecastService:
                 warnings=warnings,
                 impact=impact,
                 modified_features=override_result.modified_feature_names,
+                applied_overrides=override_result.applied_overrides,
+                modified_dates=override_result.modified_dates,
             ),
         )
 
@@ -485,6 +519,8 @@ class ScenarioForecastService:
         warnings: List[str],
         impact: Any,
         modified_features: Sequence[str],
+        applied_overrides: Sequence[Any] = (),
+        modified_dates: Sequence[date] = (),
     ) -> List[str]:
         """
         Disclose a scenario that changed inputs but not the output.
@@ -495,12 +531,36 @@ class ScenarioForecastService:
         feature, the second says the model predicts no effect -- and letting a
         planner read the first as the second would be the most misleading thing
         this endpoint could do.
+
+        A third case is told apart first: an override that set an input to the
+        value it already had changed nothing, and blaming the model for that
+        would be its own misreport.
         """
         if not modified_features:
             return warnings
 
-        baseline_total = getattr(impact, "total_baseline_forecast", None)
-        difference = getattr(impact, "total_difference", None)
+        if applied_overrides and all(
+            _override_is_noop(override) for override in applied_overrides
+        ):
+            if NO_EFFECTIVE_CHANGE_WARNING not in warnings:
+                return [*warnings, NO_EFFECTIVE_CHANGE_WARNING]
+            return warnings
+
+        # Measure on the days the scenario changed. Recursion can carry an
+        # effect into later days, but whether the lever moved the model at all
+        # is a question about the days it touched.
+        changed = set(modified_dates)
+        rows = [
+            row
+            for row in getattr(impact, "daily_impacts", None) or []
+            if getattr(row, "date", None) in changed
+        ]
+        if rows:
+            baseline_total = sum(float(row.baseline_forecast) for row in rows)
+            difference = sum(float(row.daily_difference) for row in rows)
+        else:
+            baseline_total = getattr(impact, "total_baseline_forecast", None)
+            difference = getattr(impact, "total_difference", None)
         if baseline_total in (None, 0) or difference is None:
             return warnings
 
@@ -527,6 +587,14 @@ class ScenarioForecastService:
             baseline = self.baseline_provider.resolve(request.baseline_forecast_id, request)
             if baseline.response is None:
                 warnings.append(BASELINE_RECOMPUTED_WARNING)
+            if baseline.run_id is None:
+                # A checkpoint records the model version, not its training run,
+                # and the recomputation cannot load artifacts without the run.
+                # Resolve it the same way the original baseline did; the version
+                # is concrete, so this is the same model.
+                baseline.run_id = self.baseline_service.model_resolver.resolve(
+                    baseline.model_version, model=baseline.model.model
+                ).run_id
             return baseline
 
         response = self.baseline_service.create_baseline(request)
@@ -540,6 +608,7 @@ class ScenarioForecastService:
             run_id=response.run_id,
             reused=False,
             response=response,
+            model_name=response.model,
         )
 
     def _load_feature_schema(self, baseline: ResolvedBaseline) -> FeatureSchema:

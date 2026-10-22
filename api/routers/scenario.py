@@ -21,8 +21,10 @@ from fastapi import APIRouter, Body, Depends, Header, Path, Query, Request, Resp
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
+from api.config import get_settings
 from api.core.errors import (
     BaselineNotFoundError,
+    ScenarioValidationError,
     ScenarioExpiredError,
     ScenarioNotFoundError,
     ScenarioNotSupportedError,
@@ -164,6 +166,10 @@ def get_capabilities(
         default=DEFAULT_MODEL_VERSION,
         description="Registry version, or 'latest' for the current Production model.",
     ),
+    model: Optional[str] = Query(
+        default=None,
+        description="Model family (ensemble, xgboost, lightgbm); omitted means the default.",
+    ),
     capability_service: ScenarioCapabilityService = Depends(get_capability_service),
     user: User = Depends(require_permission(Permission.VIEW_SCENARIO)),
 ) -> ScenarioCapabilitiesResponse:
@@ -173,7 +179,7 @@ def get_capabilities(
     Read-only, so every role may call it: the planner has to know what is
     possible before it can disable what is not.
     """
-    return capability_service.get_capabilities(model_version)
+    return capability_service.get_capabilities(model_version, **_model_kwargs(model))
 
 
 @router.get(
@@ -274,6 +280,7 @@ def compare_scenario(
         metadata={
             "store_id": comparison.store_id,
             "scenario_type": request.scenario.scenario_type.value,
+            "model": comparison.model,
             "model_version": comparison.model_version,
             "horizon_days": request.horizon_days,
             "baseline_forecast_id": comparison.baseline_forecast_id,
@@ -582,6 +589,31 @@ def _record_failure(
     log_scenario_failed(log_context, exc, duration_ms=duration_ms, stage=stage)
 
 
+def _checked_model(model: Optional[str]) -> Optional[str]:
+    """
+    A requested model family, refused when this deployment does not serve it.
+
+    Refused rather than mapped to the default: a planner who asked for XGBoost
+    and silently got the ensemble would read the wrong model's answer.
+    """
+    if model is None:
+        return None
+    available = list(get_settings().model_names)
+    if model not in available:
+        raise ScenarioValidationError(
+            f"Model '{model}' is not one this deployment serves.",
+            field="model",
+            details={"model": model, "available_models": available},
+        )
+    return model
+
+
+def _model_kwargs(model: Optional[str]) -> Dict[str, str]:
+    """``model=`` for the capability service, only when a family was requested."""
+    checked = _checked_model(model)
+    return {"model": checked} if checked else {}
+
+
 def _assert_scenario_supported(
     request: ScenarioRequest, capability_service: ScenarioCapabilityService
 ) -> None:
@@ -590,6 +622,7 @@ def _assert_scenario_supported(
     capabilities = capability_service.get_capabilities(
         request.model_version or DEFAULT_MODEL_VERSION,
         requested_overrides=requested_overrides,
+        **_model_kwargs(request.model),
     )
 
     scenario_type = request.scenario.scenario_type

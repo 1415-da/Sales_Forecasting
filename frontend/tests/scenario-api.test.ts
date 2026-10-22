@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   IDEMPOTENCY_KEY_HEADER,
@@ -8,6 +8,7 @@ import {
   generateRequestId,
   scenarioKeys,
 } from '@/lib/api/scenario-api';
+import { clearAccessToken, setAccessToken } from '@/lib/auth-store';
 import {
   scenarioCapabilitiesResponseSchema,
   scenarioComparisonResponseSchema,
@@ -260,6 +261,88 @@ describe('API error responses', () => {
 /* Headers                                                                     */
 /* -------------------------------------------------------------------------- */
 
+describe('authentication', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    clearAccessToken();
+  });
+
+  it('calls the global fetch without rebinding it, as browsers require', async () => {
+    // A browser's fetch throws "Illegal invocation" when its receiver is not
+    // the window; this stand-in enforces the same rule.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(function (this: unknown) {
+        if (this !== undefined && this !== globalThis) {
+          throw new TypeError('Illegal invocation');
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify(CAPABILITIES_PAYLOAD), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          }),
+        );
+      }),
+    );
+    const api = createScenarioApiClient({ baseUrl: 'http://api.test' });
+
+    const result = await api.getScenarioCapabilities('14');
+
+    expect(result.model_version).toBe('14');
+  });
+
+  it('sends the access token as a bearer header', async () => {
+    setAccessToken('scenario-token', 3600);
+    const { api, calls } = client([{ body: CAPABILITIES_PAYLOAD }]);
+
+    await api.getScenarioCapabilities('14');
+
+    expect(headerOf(calls[0]!.init, 'Authorization')).toBe('Bearer scenario-token');
+  });
+
+  it('refreshes once on a 401 and retries with the new token', async () => {
+    setAccessToken('stale', 3600);
+    // The refresh goes through the shared client, which uses the global fetch.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            success: true,
+            access_token: 'renewed',
+            token_type: 'bearer',
+            expires_in: 2700,
+            user: {
+              id: 'u1',
+              email: 'ada@example.com',
+              full_name: 'Ada',
+              role: 'ANALYST',
+              role_description: 'Analyst',
+              is_active: true,
+              must_change_password: false,
+              permissions: ['view_scenario'],
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+              last_login_at: null,
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      ),
+    );
+    const { api, calls } = client([
+      { status: 401, body: errorEnvelope('TOKEN_EXPIRED') },
+      { body: CAPABILITIES_PAYLOAD },
+    ]);
+
+    const result = await api.getScenarioCapabilities('14');
+
+    expect(result.model_version).toBe('14');
+    expect(calls).toHaveLength(2);
+    expect(headerOf(calls[1]!.init, 'Authorization')).toBe('Bearer renewed');
+  });
+});
+
 describe('request id and idempotency headers', () => {
   it('sends a generated request id on every call', async () => {
     const { api, calls } = client([{ body: CAPABILITIES_PAYLOAD }]);
@@ -452,7 +535,14 @@ describe('request construction', () => {
   });
 
   it('exposes hierarchical query keys for invalidation', () => {
-    expect(scenarioKeys.capabilities('14')).toEqual(['scenario', 'capabilities', '14']);
+    expect(scenarioKeys.capabilities('14')).toEqual(['scenario', 'capabilities', 'default', '14']);
+    // Each model family has its own versions, so the family is part of the key.
+    expect(scenarioKeys.capabilities('14', 'xgboost')).toEqual([
+      'scenario',
+      'capabilities',
+      'xgboost',
+      '14',
+    ]);
     expect(scenarioKeys.detail('scn_1')).toEqual(['scenario', 'detail', 'scn_1']);
     expect(scenarioKeys.audit('scn_1')).toEqual(['scenario', 'audit', 'scn_1']);
     expect(scenarioKeys.capabilities('14').slice(0, 1)).toEqual([...scenarioKeys.all]);

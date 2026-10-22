@@ -208,6 +208,27 @@ def test_configured_origin_is_allowed(make_client):
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
+@pytest.mark.parametrize("method", ["GET", "POST", "PATCH"])
+def test_preflight_allows_the_headers_the_browser_sends(make_client, method):
+    """
+    An authenticated browser call carries ``Authorization`` and, for the user
+    editor, uses PATCH. A preflight that rejects either blocks the request
+    before it is sent, and every signed-in page fails to load.
+    """
+    response = make_client(StubRegistry(None)).options(
+        "/v1/admin/users/some-id",
+        headers={
+            "Origin": "http://localhost:3000",
+            "Access-Control-Request-Method": method,
+            "Access-Control-Request-Headers": (
+                "authorization,content-type,x-request-id,idempotency-key"
+            ),
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
 def test_unconfigured_origin_is_not_allowed(make_client):
     """An origin that was never configured gets no allow header."""
     response = make_client(StubRegistry(None)).options(

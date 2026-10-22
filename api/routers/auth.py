@@ -56,7 +56,9 @@ from api.services.auth_service import (
     AuthResult,
     AuthService,
     TokenPair,
+    default_self_registration_role,
     self_registration_enabled,
+    self_registration_roles,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,6 +180,8 @@ def auth_config() -> AuthConfigResponse:
         self_registration_enabled=self_registration_enabled(),
         password_min_length=MIN_PASSWORD_LENGTH,
         roles=[role.value for role in ROLE_ORDER],
+        self_registration_roles=[role.value for role in self_registration_roles()],
+        default_self_registration_role=default_self_registration_role().value,
     )
 
 
@@ -187,7 +191,12 @@ def auth_config() -> AuthConfigResponse:
     status_code=201,
     summary="Create an account (when self-registration is enabled)",
     responses={
-        403: {"description": "Self-registration is disabled for this deployment."},
+        403: {
+            "description": (
+                "Self-registration is disabled, or the requested role cannot be "
+                "chosen at sign-up."
+            )
+        },
         409: {"description": "That email address is already registered."},
         422: {"description": "The password does not meet the policy."},
     },
@@ -203,13 +212,15 @@ def register(
 
     Returns 403 when self-registration is disabled, which is the default: an
     open sign-up form on a forecasting platform would let anyone reach the
-    model. The role is assigned by the server and is never read from the body.
+    model. A requested role is granted only if this deployment lists it as
+    self-assignable (see ``GET /auth/config``).
     """
     result = AuthService(session).register(
         email=str(payload.email),
         full_name=payload.full_name,
         password=payload.password,
         actor=get_actor(request),
+        role=payload.role,
     )
     set_refresh_cookie(response, result.tokens)
     return _token_response(result)

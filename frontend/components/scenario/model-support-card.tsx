@@ -6,6 +6,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { humanizeIdentifier } from '@/lib/utils/format';
+import { scenarioTypeLabel } from '@/lib/utils/scenario-results';
 import type { ScenarioCapabilityStatus, ScenarioType } from '@/lib/types/scenario';
 
 /** The disclosure the API attaches to every comparison, surfaced up front. */
@@ -98,7 +99,7 @@ export function ModelSupportCard({
                   <span className="sr-only">{srLabel}:</span>
                   <span className="min-w-0 space-y-0.5">
                     <span className="block font-medium">
-                      {humanizeIdentifier(capability.scenario_type)}
+                      {scenarioTypeLabel(capability.scenario_type)}
                     </span>
                     {capability.missing_features.length > 0 ? (
                       <span className="block break-words text-xs text-muted-foreground">

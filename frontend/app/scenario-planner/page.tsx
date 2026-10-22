@@ -14,7 +14,7 @@
  * keeps a scenario reproducible and clearly labelled as demo input.
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, Layers, Undo2 } from 'lucide-react';
 
 import { RequireAuth } from '@/components/auth/require-auth';
@@ -52,12 +52,13 @@ import {
 import { NO_PERMISSION_MESSAGE, PERMISSIONS } from '@/lib/rbac';
 import { useScenarioCapabilities } from '@/hooks/use-scenario-capabilities';
 import { useScenarioForecast } from '@/hooks/use-scenario-forecast';
-import { useScenarioForm } from '@/hooks/use-scenario-form';
+import { DEFAULT_SCENARIO_MODEL, addDays, useScenarioForm } from '@/hooks/use-scenario-form';
 import { useScenarioRollback } from '@/hooks/use-scenario-rollback';
-import type {
-  HistoryPoint,
-  ScenarioComparisonResponse,
-  ScenarioType,
+import {
+  SCENARIO_LIMITS,
+  type HistoryPoint,
+  type ScenarioComparisonResponse,
+  type ScenarioType,
 } from '@/lib/types/scenario';
 import { humanizeIdentifier } from '@/lib/utils/format';
 import { buildComparisonCsv, comparisonFileName } from '@/lib/utils/scenario-results';
@@ -139,11 +140,14 @@ function ScenarioPlanner() {
     [],
   );
   const [modelVersion, setPendingModelVersion] = useState('latest');
+  // Held here as well as in the form: capabilities are fetched before the form
+  // exists, and both must ask about the same model.
+  const [modelFamily, setModelFamily] = useState(DEFAULT_SCENARIO_MODEL);
   const [rollbackOpen, setRollbackOpen] = useState(false);
   const [rolledBackIds, setRolledBackIds] = useState<string[]>([]);
 
   const { toast } = useToast();
-  const capabilities = useScenarioCapabilities({ modelVersion });
+  const capabilities = useScenarioCapabilities({ modelVersion, model: modelFamily });
   const forecast = useScenarioForecast();
   const rollback = useScenarioRollback();
 
@@ -157,12 +161,39 @@ function ScenarioPlanner() {
     [capabilities.isSuccess, capabilities.isScenarioSupported],
   );
 
+  // Scenarios apply to forecast days, so the first one -- the day after the
+  // history ends -- is always a valid start and saves a required click.
+  const formInit = useMemo(() => {
+    const firstForecastDay = history.length
+      ? addDays(history[history.length - 1]!.date, 1)
+      : '';
+    // A closure uses an explicit end date; a one-day closure is the default.
+    return { assumptions: { startDate: firstForecastDay, endDate: firstForecastDay } };
+  }, [history]);
+
   const form = useScenarioForm({
+    ...formInit,
+    model: modelFamily,
     modelVersion,
     history,
     isScenarioTypeSupported,
     availableFeatures: capabilities.isSuccess ? availableFeatures : undefined,
   });
+
+  // The form opens on Promotion, which a model trained without promotion data
+  // cannot serve. Move to the first lever the model can express rather than
+  // opening on a type whose Run button can never enable. A concrete lever is
+  // preferred over Custom, which needs the user to know feature names.
+  const { setScenarioType } = form;
+  const currentScenarioType = form.state.scenarioType;
+  const supportedScenarioTypes = capabilities.supportedScenarioTypes;
+  useEffect(() => {
+    if (!capabilities.isSuccess || supportedScenarioTypes.length === 0) return;
+    if (supportedScenarioTypes.includes(currentScenarioType)) return;
+    setScenarioType(
+      supportedScenarioTypes.find((type) => type !== 'custom') ?? supportedScenarioTypes[0]!,
+    );
+  }, [capabilities.isSuccess, supportedScenarioTypes, currentScenarioType, setScenarioType]);
 
   const handleModelChange = useCallback(
     (value: string) => {
@@ -170,6 +201,43 @@ function ScenarioPlanner() {
       form.setModelVersion(value);
     },
     [form],
+  );
+
+  const handleModelFamilyChange = useCallback(
+    (value: string) => {
+      setModelFamily(value);
+      // A family's version numbers are its own; start from its latest.
+      setPendingModelVersion(SCENARIO_LIMITS.defaultModelVersion);
+      form.setModel(value);
+    },
+    [form],
+  );
+
+  // Families and their versions, from the registry the Forecast Console uses.
+  const modelFamilies = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const item of models.data?.models ?? []) {
+      if (!seen.has(item.model)) seen.set(item.model, item.label);
+    }
+    if (seen.size === 0) seen.set(DEFAULT_SCENARIO_MODEL, 'Ensemble');
+    return [...seen].map(([id, label]) => ({
+      id,
+      label: id === DEFAULT_SCENARIO_MODEL ? `${label} (most accurate)` : label,
+    }));
+  }, [models.data]);
+
+  const versionOptions = useMemo(
+    () => [
+      ...MODEL_OPTIONS,
+      ...(models.data?.models ?? [])
+        .filter((item) => item.model === modelFamily)
+        .map((item) => ({
+          version: String(item.version),
+          label: `Version ${item.version} (${item.stage})`,
+          stage: item.stage,
+        })),
+    ],
+    [models.data, modelFamily],
   );
 
   /**
@@ -218,11 +286,11 @@ function ScenarioPlanner() {
   }, [forecast, form, reusableBaselineId]);
 
   const handleReset = useCallback(() => {
-    form.reset();
+    form.reset({ ...formInit, modelVersion });
     forecast.reset();
     forecast.clearLastComparison();
     setRolledBackIds([]);
-  }, [form, forecast]);
+  }, [form, forecast, formInit, modelVersion]);
 
   const handleExport = useCallback(() => {
     if (!comparison || isRolledBack) return;
@@ -263,8 +331,10 @@ function ScenarioPlanner() {
     document.getElementById('scenario-model')?.focus();
   }, []);
 
+  // Only the levers this model can express: an unavailable one is not a
+  // choice, so it is neither offered nor listed.
   const capabilityList = useMemo(
-    () => capabilities.data?.capabilities ?? [],
+    () => (capabilities.data?.capabilities ?? []).filter((item) => item.supported),
     [capabilities.data],
   );
 
@@ -279,7 +349,13 @@ function ScenarioPlanner() {
     isRetrying: forecast.isRetrying,
     resultStatus: form.resultStatus,
     canRun,
-    errors,
+    // Every outstanding requirement, touched or not: a disabled Run button
+    // must say why, or the user has no way to find the missing field.
+    errors: isPermittedToRun
+      ? form.errors
+      : {
+          permission: `${NO_PERMISSION_MESSAGE} Running a scenario requires a Business User role or above.`,
+        },
     failure: forecast.errorPresentation,
     isReusingBaseline: Boolean(reusableBaselineId),
     isRolledBack,
@@ -298,7 +374,10 @@ function ScenarioPlanner() {
         <div className="w-full space-y-4 lg:w-[380px] lg:shrink-0">
           <ScenarioContextCard
             stores={storeOptions}
-            models={MODEL_OPTIONS}
+            modelFamilies={modelFamilies}
+            model={modelFamily}
+            onModelFamilyChange={handleModelFamilyChange}
+            models={versionOptions}
             storeId={form.state.storeId}
             horizonDays={form.state.horizonDays}
             modelVersion={form.state.modelVersion}
@@ -332,6 +411,9 @@ function ScenarioPlanner() {
             errors={errors}
             availableFeatures={availableFeatures}
             maxDurationDays={form.state.horizonDays}
+            forecastStartDate={formInit.assumptions.startDate}
+            horizonDays={form.state.horizonDays}
+            storeId={form.state.storeId}
           />
 
           <ModelSupportCard

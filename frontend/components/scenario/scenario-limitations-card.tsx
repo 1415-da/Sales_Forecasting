@@ -4,6 +4,7 @@ import { Info } from 'lucide-react';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { formatDate, humanizeIdentifier } from '@/lib/utils/format';
+import { modelFamilyLabel, scenarioTypeLabel } from '@/lib/utils/scenario-results';
 import type { ScenarioComparisonResponse } from '@/lib/types/scenario';
 
 /**
@@ -52,7 +53,7 @@ export function ScenarioLimitationsCard({
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">Scenario</dt>
               <dd className="text-right font-medium">
-                {humanizeIdentifier(comparison.scenario_type)}
+                {scenarioTypeLabel(comparison.scenario_type)}
               </dd>
             </div>
             {assumptions?.start_date ? (
@@ -105,7 +106,8 @@ export function ScenarioLimitationsCard({
             <div className="flex justify-between gap-3">
               <dt className="text-muted-foreground">Model</dt>
               <dd className="text-right font-medium">
-                {comparison.model_version} ({humanizeIdentifier(comparison.model_stage)})
+                {modelFamilyLabel(comparison.model)} v{comparison.model_version} (
+                {humanizeIdentifier(comparison.model_stage)})
               </dd>
             </div>
             <div className="flex justify-between gap-3">

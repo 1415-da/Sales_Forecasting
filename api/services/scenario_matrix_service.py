@@ -52,6 +52,7 @@ from api.services.forecast_service import (
     MIN_RESIDUAL_FRACTION,
     Z_SCORES,
     ForecastService,
+    carry_forward_value,
 )
 from api.services.model_registry_service import ResolvedModelVersion
 from api.services.scenario_forecast_service import MatrixPrediction
@@ -166,11 +167,12 @@ class ScenarioMatrixBuilder:
         model: ResolvedModel,
     ) -> Any:
         """Run the shared pipeline for the baseline leg."""
+        # The family the baseline resolved, so both legs of the comparison run
+        # on the model the user chose.
+        family = model.model or self.settings.default_model
         resolved = ResolvedModelVersion(
-            model=self.settings.default_model,
-            registered_model_name=self.settings.registered_model_name(
-                self.settings.default_model
-            ),
+            model=family,
+            registered_model_name=self.settings.registered_model_name(family),
             version=model.model_version,
             stage=model.model_stage,
             run_id=model.run_id,
@@ -301,7 +303,9 @@ class RecursiveMatrixPredictor:
                 )
             value = max(0.0, value)
             predictions.append(value)
-            series.append(value)
+            # A closure costs the closed days, not the weeks after; see
+            # `carry_forward_value`, which the forecast endpoint shares.
+            series.append(carry_forward_value(builder, bundle, row, value))
 
         quantiles = self._build_quantiles(
             predictions=predictions,

@@ -41,6 +41,11 @@ class FeatureEngineer:
         if 'is_holiday' in date_features:
             us_holidays = holidays.US()
             df['is_holiday'] = df[date_col].apply(lambda x: x in us_holidays).astype(int)
+            # A closed day is its own signal. Counting it as a holiday as well
+            # would teach the model that "holiday" means "no sales", and a
+            # Holiday scenario would then predict a closure.
+            if 'is_closed' in df.columns:
+                df.loc[df['is_closed'] == 1, 'is_holiday'] = 0
         
         logger.info(f"Created {len(date_features)} date features")
         return df
@@ -65,19 +70,23 @@ class FeatureEngineer:
         df = df.copy()
         windows = self.feature_config['rolling_features']['windows']
         functions = self.feature_config['rolling_features']['functions']
-        
+
+        # Windows end the day *before* the row (shift(1)). Without the shift a
+        # row's window contains its own target, which the model reads straight
+        # back; at serving time that day is unknown, so the window the API
+        # builds already ends the day before -- this makes training match it.
         if group_cols:
             for window in windows:
                 for func in functions:
                     col_name = f'{target_col}_rolling_{window}_{func}'
                     df[col_name] = df.groupby(group_cols)[target_col].transform(
-                        lambda x: x.rolling(window, min_periods=1).agg(func)
+                        lambda x: x.shift(1).rolling(window, min_periods=1).agg(func)
                     )
         else:
             for window in windows:
                 for func in functions:
                     col_name = f'{target_col}_rolling_{window}_{func}'
-                    df[col_name] = df[target_col].rolling(window, min_periods=1).agg(func)
+                    df[col_name] = df[target_col].shift(1).rolling(window, min_periods=1).agg(func)
         
         logger.info(f"Created {len(windows) * len(functions)} rolling features")
         return df

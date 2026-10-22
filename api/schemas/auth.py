@@ -37,9 +37,10 @@ class RegisterRequest(BaseModel):
     """
     Self-registration payload.
 
-    Deliberately has no ``role`` field. Accepting one would let anyone grant
-    themselves whatever privilege they asked for; the role is assigned by the
-    server from configuration.
+    ``role`` is a request, not a grant: the server honours it only when it is
+    in the deployment's self-assignable list (``SELF_REGISTRATION_ROLES``,
+    which excludes ADMIN by default) and refuses anything else. Omitted, the
+    configured default role is used.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -47,6 +48,7 @@ class RegisterRequest(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=200)
     password: str = Field(min_length=1, max_length=256)
+    role: Optional[Role] = None
 
     @field_validator("full_name")
     @classmethod
@@ -176,6 +178,10 @@ class AuthConfigResponse(BaseModel):
     self_registration_enabled: bool
     password_min_length: int
     roles: List[str]
+    #: Roles the sign-up form may offer, least privileged first, with the role
+    #: a new account gets when none is chosen.
+    self_registration_roles: List[str] = Field(default_factory=list)
+    default_self_registration_role: Optional[str] = None
 
 
 class SessionSummary(BaseModel):

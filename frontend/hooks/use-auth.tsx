@@ -45,6 +45,8 @@ import type { UserProfile } from '@/lib/types/auth';
 
 /** Where an unauthenticated visitor is sent. */
 export const LOGIN_PATH = '/login';
+/** Where a signed-out visitor is sent: new users create an account first. */
+export const SIGN_UP_PATH = '/register';
 
 /** Where a successful sign-in lands. */
 export const POST_LOGIN_PATH = '/forecast';
@@ -63,6 +65,7 @@ export interface AuthContextValue {
     email: string;
     full_name: string;
     password: string;
+    role?: string;
   }) => Promise<UserProfile>;
   readonly signOut: (allSessions?: boolean) => Promise<void>;
   /** Re-read `/auth/me`, after a role change or a password change. */
@@ -164,7 +167,7 @@ export function AuthProvider({ children }: { readonly children: ReactNode }) {
   );
 
   const signUp = useCallback(
-    async (payload: { email: string; full_name: string; password: string }) => {
+    async (payload: { email: string; full_name: string; password: string; role?: string }) => {
       const result = await apiRegister(payload);
       setUser(result.user);
       setStatus('authenticated');

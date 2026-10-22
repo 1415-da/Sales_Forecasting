@@ -2,8 +2,8 @@
 
 import { Loader2, UserPlus } from 'lucide-react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useState } from 'react';
 
 import { EmptyState } from '@/components/shared/empty-state';
 import { Button } from '@/components/ui/button';
@@ -12,6 +12,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { POST_LOGIN_PATH, useAuth } from '@/hooks/use-auth';
 import { ApiError, friendlyMessage, getAuthConfig } from '@/lib/api';
+import { ROLES, ROLE_DESCRIPTIONS, ROLE_LABELS, type Role } from '@/lib/rbac';
+import { cn } from '@/lib/utils';
 
 /** Mirrors the server policy in `api.core.security`, for pre-submit feedback. */
 const PASSWORD_RULES: readonly { readonly label: string; readonly test: (value: string) => boolean }[] = [
@@ -23,17 +25,37 @@ const PASSWORD_RULES: readonly { readonly label: string; readonly test: (value: 
 ];
 
 /**
- * Self-registration page.
+ * Self-registration page, and where a signed-out visitor lands.
  *
- * Only reachable when the deployment enables it. The role is not a field:
+ * Only usable when the deployment enables it. The role is not a field:
  * the server assigns it, because a form that let someone choose their own
  * privilege level would not be an access-control system.
+ *
+ * `useSearchParams` needs a Suspense boundary, as on the sign-in page.
  */
 export default function RegisterPage() {
+  return (
+    <Suspense fallback={null}>
+      <RegisterForm />
+    </Suspense>
+  );
+}
+
+function RegisterForm() {
   const router = useRouter();
+  const params = useSearchParams();
   const { signUp, isAuthenticated, isChecking } = useAuth();
 
+  // The page `RequireAuth` was protecting, carried through sign-up or sign-in.
+  const nextParam = params.get('next');
+  const next = nextParam || POST_LOGIN_PATH;
+  const loginHref = nextParam ? `/login?next=${encodeURIComponent(nextParam)}` : '/login';
+
   const [enabled, setEnabled] = useState<boolean | null>(null);
+  // Offered by the server, least privileged first. The server re-checks the
+  // choice, so this list is presentation, not the control.
+  const [offeredRoles, setOfferedRoles] = useState<Role[]>([]);
+  const [role, setRole] = useState<Role | ''>('');
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -42,14 +64,23 @@ export default function RegisterPage() {
   const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
-    if (!isChecking && isAuthenticated) router.replace(POST_LOGIN_PATH);
-  }, [isAuthenticated, isChecking, router]);
+    if (!isChecking && isAuthenticated) router.replace(next);
+  }, [isAuthenticated, isChecking, next, router]);
 
   useEffect(() => {
     let cancelled = false;
     getAuthConfig()
       .then((config) => {
-        if (!cancelled) setEnabled(config.self_registration_enabled);
+        if (cancelled) return;
+        setEnabled(config.self_registration_enabled);
+        const offered = config.self_registration_roles.filter((item): item is Role =>
+          (ROLES as readonly string[]).includes(item),
+        );
+        setOfferedRoles(offered);
+        const fallback = config.default_self_registration_role;
+        setRole(
+          offered.find((item) => item === fallback) ?? offered[0] ?? '',
+        );
       })
       .catch(() => {
         if (!cancelled) setEnabled(false);
@@ -84,8 +115,9 @@ export default function RegisterPage() {
         email: email.trim(),
         full_name: fullName.trim(),
         password,
+        ...(role ? { role } : {}),
       });
-      router.replace(POST_LOGIN_PATH);
+      router.replace(next);
     } catch (caught) {
       setError(
         caught instanceof ApiError
@@ -107,7 +139,7 @@ export default function RegisterPage() {
               description="Accounts on this deployment are created by an administrator."
               action={
                 <Link
-                  href="/login"
+                  href={loginHref}
                   className="text-sm font-medium underline underline-offset-4"
                 >
                   Back to sign in
@@ -126,7 +158,8 @@ export default function RegisterPage() {
         <CardHeader className="space-y-2">
           <CardTitle className="text-lg">Create an account</CardTitle>
           <CardDescription>
-            Your access level is assigned by an administrator after sign-up.
+            New to Sales Forecasting? Create an account and choose the role
+            that matches your work. An administrator can change it later.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -151,6 +184,40 @@ export default function RegisterPage() {
                 onChange={(event) => setEmail(event.target.value)}
               />
             </div>
+
+            {offeredRoles.length > 0 ? (
+              <fieldset className="space-y-2">
+                <legend className="text-sm font-medium leading-none">Role</legend>
+                <div className="space-y-2 pt-1">
+                  {offeredRoles.map((item) => (
+                    <label
+                      key={item}
+                      htmlFor={`role-${item}`}
+                      className={cn(
+                        'flex cursor-pointer items-start gap-3 rounded-md border p-3 transition-colors',
+                        role === item ? 'border-primary bg-accent' : 'hover:bg-accent/50',
+                      )}
+                    >
+                      <input
+                        id={`role-${item}`}
+                        type="radio"
+                        name="role"
+                        value={item}
+                        checked={role === item}
+                        onChange={() => setRole(item)}
+                        className="mt-0.5"
+                      />
+                      <span className="space-y-0.5">
+                        <span className="block text-sm font-medium">{ROLE_LABELS[item]}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          {ROLE_DESCRIPTIONS[item]}
+                        </span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+            ) : null}
 
             <div className="space-y-2">
               <Label htmlFor="password">Password</Label>
@@ -213,7 +280,7 @@ export default function RegisterPage() {
 
             <p className="text-center text-sm text-muted-foreground">
               Already have an account?{' '}
-              <Link href="/login" className="font-medium underline">
+              <Link href={loginHref} className="font-medium underline">
                 Sign in
               </Link>
             </p>

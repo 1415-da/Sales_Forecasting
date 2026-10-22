@@ -71,11 +71,16 @@ def _call(
     path: str,
     body: Optional[Dict[str, Any]] = None,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
+    token: Optional[str] = None,
 ) -> ApiResult:
     """Make one request and normalise every outcome into an ``ApiResult``."""
     url = f"{api_base_url()}{path}"
     request_id = _new_request_id()
     headers = {"Accept": "application/json", "X-Request-ID": request_id}
+    # Every /v1 route requires a bearer token. It is passed per call rather than
+    # held here because one Streamlit process serves many browser sessions.
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
 
     try:
         response = requests.request(
@@ -147,15 +152,27 @@ def get_health() -> ApiResult:
     return _call("GET", "/health")
 
 
-def get_models() -> ApiResult:
+def login(email: str, password: str) -> ApiResult:
+    """
+    Sign in and obtain an access token (``data["access_token"]``).
+
+    The refresh cookie the API also sets is not used: when the access token
+    expires the console asks the operator to sign in again.
+    """
+    return _call("POST", "/auth/login", body={"email": email, "password": password})
+
+
+def get_models(token: Optional[str] = None) -> ApiResult:
     """The model version serving each configured model."""
-    return _call("GET", "/v1/models")
+    return _call("GET", "/v1/models", token=token)
 
 
-def get_model(version: str, model: Optional[str] = None) -> ApiResult:
+def get_model(
+    version: str, model: Optional[str] = None, token: Optional[str] = None
+) -> ApiResult:
     """Detail for one model version, including its feature list."""
     query = f"?model={model}" if model else ""
-    return _call("GET", f"/v1/models/{version}{query}")
+    return _call("GET", f"/v1/models/{version}{query}", token=token)
 
 
 def create_forecast(
@@ -165,6 +182,7 @@ def create_forecast(
     horizon_days: int,
     confidence_level: float,
     history: List[Dict[str, Any]],
+    token: Optional[str] = None,
 ) -> ApiResult:
     """
     Generate a forecast.
@@ -184,6 +202,7 @@ def create_forecast(
             "history": history,
         },
         timeout=FORECAST_TIMEOUT_SECONDS,
+        token=token,
     )
 
 
@@ -194,4 +213,5 @@ __all__ = [
     "get_health",
     "get_model",
     "get_models",
+    "login",
 ]

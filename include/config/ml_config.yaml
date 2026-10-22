@@ -13,7 +13,10 @@ data:
   kaggle_competition: m5-forecasting-accuracy
   kaggle_download: false         # uses local CSVs from raw_path
   kaggle_competition_path: ""    # optional: skip download if CSVs already on disk
-  max_sales_files: 365           # daily parquet files loaded for training (raise or omit key for all)
+  # Daily parquet files loaded for training; null = all (~5 years). The full
+  # history is what gives the model several Christmases and every SNAP cycle
+  # to learn from; each file is reduced to store-day totals as it is read.
+  max_sales_files: null
 
 # MLflow Configuration
 mlflow:

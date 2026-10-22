@@ -114,6 +114,8 @@ class BaselineForecastResponse(BaseModel):
 
     baseline_forecast_id: str
     store_id: str
+    #: Model family the baseline came from (``ensemble``, ``xgboost``, ...).
+    model: Optional[str] = None
     model_version: str
     model_stage: str
     generated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -145,6 +147,9 @@ class BaselineForecastCheckpoint(BaseModel):
 
     forecast_id: str
     store_id: str
+    #: Model family; ``None`` on rows written before it was recorded, which
+    #: were all produced by the default model.
+    model: Optional[str] = None
     model_version: str
     model_stage: str
     horizon_days: int

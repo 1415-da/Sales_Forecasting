@@ -15,6 +15,8 @@
 
 import type { z } from 'zod';
 
+import { refreshSession } from '@/lib/api';
+import { getAccessToken } from '@/lib/auth-store';
 import {
   type ScenarioAuditListResponse,
   type ScenarioCapabilitiesResponse,
@@ -155,7 +157,11 @@ export class ScenarioApiClient {
 
   constructor(options: ScenarioApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl ?? defaultBaseUrl()).replace(/\/+$/, '');
-    this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    // Wrapped, not stored bare: `this.fetchImpl(...)` would call the browser's
+    // fetch with this client as its receiver, which browsers reject with
+    // "Illegal invocation" -- surfacing as a network error on every call.
+    this.fetchImpl =
+      options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.onRequestId = options.onRequestId;
   }
 
@@ -163,8 +169,11 @@ export class ScenarioApiClient {
   async getScenarioCapabilities(
     modelVersion: string = SCENARIO_LIMITS.defaultModelVersion,
     options: RequestOptions = {},
+    model?: string,
   ): Promise<ScenarioCapabilitiesResponse> {
     const query = new URLSearchParams({ model_version: modelVersion });
+    // Each model family has its own versions, so the family is part of the question.
+    if (model) query.set('model', model);
     return this.request(
       { method: 'GET', path: `${SCENARIO_BASE_PATH}/capabilities?${query}`, ...options },
       scenarioCapabilitiesResponseSchema,
@@ -287,15 +296,28 @@ export class ScenarioApiClient {
       headers[IDEMPOTENCY_KEY_HEADER] = config.idempotencyKey;
     }
 
+    // Every scenario route requires a bearer token. It is read per attempt so
+    // the retry after a refresh carries the new one.
+    const send = (): Promise<Response> => {
+      const token = getAccessToken();
+      return this.fetchImpl(`${this.baseUrl}${config.path}`, {
+        method: config.method,
+        headers: token ? { ...headers, Authorization: `Bearer ${token}` } : headers,
+        body: config.body === undefined ? undefined : JSON.stringify(config.body),
+        credentials: 'include',
+        signal: deadline.signal,
+      });
+    };
+
     const deadline = withTimeout(config.signal, config.timeoutMs);
     let response: Response;
     try {
-      response = await this.fetchImpl(`${this.baseUrl}${config.path}`, {
-        method: config.method,
-        headers,
-        body: config.body === undefined ? undefined : JSON.stringify(config.body),
-        signal: deadline.signal,
-      });
+      response = await send();
+      // An expired access token: refresh once through the shared single-flight
+      // refresh (so concurrent 401s do not trip replay detection) and retry.
+      if (response.status === 401 && (await refreshSession())) {
+        response = await send();
+      }
     } catch (cause) {
       if (deadline.timedOut()) {
         throw ScenarioApiError.timeout(config.timeoutMs ?? 0);
@@ -362,8 +384,8 @@ export function createScenarioApiClient(
  */
 export const scenarioKeys = {
   all: ['scenario'] as const,
-  capabilities: (modelVersion: string) =>
-    [...scenarioKeys.all, 'capabilities', modelVersion] as const,
+  capabilities: (modelVersion: string, model?: string) =>
+    [...scenarioKeys.all, 'capabilities', model ?? 'default', modelVersion] as const,
   detail: (scenarioId: string) => [...scenarioKeys.all, 'detail', scenarioId] as const,
   audit: (scenarioId: string) => [...scenarioKeys.all, 'audit', scenarioId] as const,
 } as const;

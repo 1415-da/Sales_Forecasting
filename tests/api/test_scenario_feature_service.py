@@ -855,3 +855,50 @@ def test_error_codes_cover_the_required_set():
         "TARGET_COLUMN_MODIFICATION_ATTEMPTED",
     }
     assert required <= {code.value for code in ScenarioOverrideErrorCode}
+
+
+# --------------------------------------------------------------------------
+# SNAP benefit days
+# --------------------------------------------------------------------------
+
+
+def _snap_frame(baseline_snap: int) -> pd.DataFrame:
+    frame = build_frame(columns=ALL_FEATURES)
+    frame["snap_day"] = baseline_snap
+    return frame
+
+
+@pytest.mark.parametrize(("mode", "baseline", "expected"), [("add", 0, 1), ("remove", 1, 0)])
+def test_snap_marks_only_the_window(service, mode, baseline, expected):
+    from api.schemas.scenario import SnapMode
+
+    window = [FORECAST_START + timedelta(days=offset) for offset in (2, 3, 4)]
+    scenario = ScenarioAssumptions(
+        scenario_type=ScenarioType.SNAP,
+        start_date=window[0],
+        end_date=window[-1],
+        snap_mode=SnapMode(mode),
+    )
+
+    result = apply(
+        service,
+        scenario,
+        frame=_snap_frame(baseline),
+        schema=build_schema(ALL_FEATURES + ["snap_day"]),
+    )
+    out = result.scenario_future_features
+
+    assert (rows_for(out, window)["snap_day"] == expected).all()
+    outside = out.loc[~pd.to_datetime(out["date"]).dt.date.isin(window)]
+    assert (outside["snap_day"] == baseline).all()
+    assert result.modified_feature_names == ["snap_day"]
+
+
+def test_snap_is_unsupported_without_the_feature(service):
+    scenario = ScenarioAssumptions(
+        scenario_type=ScenarioType.SNAP,
+        start_date=FORECAST_START,
+        end_date=FORECAST_START + timedelta(days=1),
+    )
+    with pytest.raises(ScenarioNotSupportedError):
+        apply(service, scenario)

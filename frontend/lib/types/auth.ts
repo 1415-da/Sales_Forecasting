@@ -43,6 +43,9 @@ export const authConfigSchema = z.object({
   self_registration_enabled: z.boolean(),
   password_min_length: z.number(),
   roles: z.array(z.string()),
+  /** Roles the sign-up form may offer, least privileged first. */
+  self_registration_roles: z.array(z.string()).default([]),
+  default_self_registration_role: z.string().nullish(),
 });
 
 export const logoutResponseSchema = z.object({

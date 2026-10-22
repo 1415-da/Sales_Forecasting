@@ -26,6 +26,7 @@ from api.dependencies.scenario import (  # noqa: E402
 from api.main import create_app  # noqa: E402
 from api.middleware.error_handler import REQUEST_ID_HEADER  # noqa: E402
 from api.schemas.baseline_forecast import (  # noqa: E402
+    BaselineForecastCheckpoint,
     BaselineDailyForecast,
     ModelStage,
     UncertaintyMethod,
@@ -107,7 +108,7 @@ class FakeCapabilityService:
         self.error = error
         self.calls: List[str] = []
 
-    def get_capabilities(self, model_version, requested_overrides=None):
+    def get_capabilities(self, model_version, requested_overrides=None, model=None):
         self.calls.append(model_version)
         if self.error:
             raise self.error
@@ -951,3 +952,80 @@ def test_error_envelope_is_consistent_across_routes(client, context):
         "request_id",
         "timestamp",
     }
+
+
+# --------------------------------------------------------------------------
+# Model choice
+# --------------------------------------------------------------------------
+
+
+def test_the_chosen_model_reaches_the_forecast_service(client, context):
+    response = client.post("/v1/scenario/compare", json=request_body(model="xgboost"))
+
+    assert response.status_code == 200
+    assert context.forecast_service.calls[0].model == "xgboost"
+
+
+def test_a_model_this_deployment_does_not_serve_is_refused(client, context):
+    """Silently using the default would show the wrong model's answer."""
+    response = client.post("/v1/scenario/compare", json=request_body(model="catboost"))
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["field"] == "model"
+    assert "xgboost" in error["details"]["available_models"]
+    assert context.forecast_service.calls == []
+
+
+def test_a_baseline_from_another_model_is_not_reused():
+    """A scenario must be compared against a baseline from the same model."""
+    from api.schemas.baseline_forecast import BaselineForecastStatus
+    from api.schemas.scenario import ScenarioRequest
+    from api.services.scenario_forecast_service import (
+        CheckpointBaselineProvider,
+        ScenarioComparisonError,
+    )
+
+    request = ScenarioRequest(**request_body(model="xgboost"))
+    checkpoint = BaselineForecastCheckpoint(
+        forecast_id="bf_existing",
+        store_id=request.store_id,
+        model="ensemble",
+        model_version="2",
+        model_stage="Production",
+        horizon_days=request.horizon_days,
+        history_start_date=request.history[0].date,
+        history_end_date=request.history[-1].date,
+        forecast_start_date=FORECAST_START,
+        forecast_end_date=FORECAST_START + timedelta(days=request.horizon_days - 1),
+        data_source="kaggle_m5",
+        dataset_version="v1.0.0",
+        feature_schema_version="v1",
+        status=BaselineForecastStatus.COMPLETED,
+        created_at=datetime.now(timezone.utc),
+    )
+
+    with pytest.raises(ScenarioComparisonError) as caught:
+        CheckpointBaselineProvider._validate_matches_request(checkpoint, request)
+    assert caught.value.details["mismatches"]["model"] == {
+        "baseline": "ensemble",
+        "requested": "xgboost",
+    }
+
+
+def test_a_missing_checkpoint_model_column_is_added_at_start_up(tmp_path, monkeypatch):
+    """A database created before model choice gains the nullable column."""
+    import sqlalchemy as sa
+
+    from api.db import session as db_session
+
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+    with engine.begin() as connection:
+        connection.execute(sa.text("CREATE TABLE scenario_baseline_forecasts (id INTEGER)"))
+    monkeypatch.setattr(db_session, "get_engine", lambda: engine)
+
+    db_session.ensure_additive_columns()
+    db_session.ensure_additive_columns()  # idempotent
+
+    columns = {column["name"] for column in sa.inspect(engine).get_columns("scenario_baseline_forecasts")}
+    assert "model" in columns

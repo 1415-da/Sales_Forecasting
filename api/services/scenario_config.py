@@ -45,6 +45,7 @@ DEFAULT_ENABLED_SCENARIO_TYPES: Tuple[ScenarioType, ...] = (
     ScenarioType.CLOSURE,
     ScenarioType.HOLIDAY,
     ScenarioType.PRICE,
+    ScenarioType.SNAP,
     ScenarioType.CUSTOM,
 )
 
@@ -131,6 +132,20 @@ _CAPABILITY_SPECS: Dict[ScenarioType, Dict[str, Any]] = {
         "notes": (
             "ScenarioAssumptions has no dedicated price lever yet; express the move "
             "via discount_depth or custom_overrides until the price engine lands."
+        ),
+    },
+    ScenarioType.SNAP: {
+        "label": "SNAP benefit days",
+        "description": (
+            "Add or remove SNAP benefit-payment days over a date window. In the "
+            "training data, sales run about 10% higher on those days."
+        ),
+        "required": ["start_date", "end_date"],
+        "optional": ["duration_days", "snap_mode"],
+        "constraints": {"snap_mode_values": ["add", "remove"]},
+        "notes": (
+            "Benefit days are issued on fixed days of the month per state; days "
+            "that already are (or are not) benefit days do not change."
         ),
     },
     ScenarioType.CUSTOM: {

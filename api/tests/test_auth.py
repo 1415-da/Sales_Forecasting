@@ -19,6 +19,7 @@ from api.core.errors import (
     EmailAlreadyRegisteredError,
     InvalidCredentialsError,
     RegistrationDisabledError,
+    RoleNotSelfAssignableError,
     TokenInvalidError,
     WeakPasswordError,
 )
@@ -145,12 +146,7 @@ def test_registration_is_refused_when_disabled(auth, monkeypatch):
 def test_registration_assigns_the_configured_role_not_a_requested_one(
     auth, monkeypatch
 ):
-    """
-    The role comes from configuration, never from the caller.
-
-    The schema has no role field, and this pins the service side of that: a
-    self-registered account must not be able to grant itself privilege.
-    """
+    """With no role requested, the configured default is assigned."""
     monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
     monkeypatch.setenv("SELF_REGISTRATION_ROLE", "ANALYST")
     with auth() as service:
@@ -173,6 +169,63 @@ def test_self_registration_cannot_grant_a_privileged_role(auth, monkeypatch):
             email=unique_email(), full_name="Nope", password=STRONG, actor=ACTOR
         )
     assert result.user.role == Role.VIEWER.value
+
+
+@pytest.mark.parametrize(
+    "role", [Role.VIEWER, Role.BUSINESS_USER, Role.ANALYST, Role.ML_ENGINEER]
+)
+def test_a_self_assignable_role_chosen_at_sign_up_is_granted(auth, monkeypatch, role):
+    monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
+    monkeypatch.delenv("SELF_REGISTRATION_ROLES", raising=False)
+    with auth() as service:
+        result = service.register(
+            email=unique_email(), full_name="Ada", password=STRONG, actor=ACTOR, role=role
+        )
+    assert result.user.role == role.value
+
+
+def test_admin_cannot_be_chosen_at_sign_up_by_default(auth, monkeypatch):
+    """
+    A public form that hands out ADMIN hands out the platform.
+
+    The request is refused -- not silently downgraded -- and the refusal is
+    audited, so an attempt to self-escalate is visible.
+    """
+    monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
+    monkeypatch.delenv("SELF_REGISTRATION_ROLES", raising=False)
+    email = unique_email()
+    with auth() as service:
+        with pytest.raises(RoleNotSelfAssignableError) as caught:
+            service.register(
+                email=email, full_name="Eve", password=STRONG, actor=ACTOR, role=Role.ADMIN
+            )
+    assert caught.value.status_code == 403
+    assert "ADMIN" not in caught.value.details["allowed_roles"]
+    with session_scope() as session:
+        assert UserRepository(session).get_by_email(email) is None
+
+
+def test_admin_can_be_made_self_assignable_explicitly(auth, monkeypatch):
+    """A private demo may opt in; it has to be named in the list to count."""
+    monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
+    monkeypatch.setenv("SELF_REGISTRATION_ROLES", "VIEWER,ADMIN")
+    with auth() as service:
+        result = service.register(
+            email=unique_email(), full_name="Demo", password=STRONG, actor=ACTOR, role=Role.ADMIN
+        )
+    assert result.user.role == Role.ADMIN.value
+
+
+def test_a_role_outside_a_narrowed_list_is_refused(auth, monkeypatch):
+    monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
+    monkeypatch.setenv("SELF_REGISTRATION_ROLES", "VIEWER")
+    monkeypatch.setenv("SELF_REGISTRATION_ROLE", "VIEWER")
+    with auth() as service:
+        with pytest.raises(RoleNotSelfAssignableError):
+            service.register(
+                email=unique_email(), full_name="Al", password=STRONG, actor=ACTOR,
+                role=Role.ML_ENGINEER,
+            )
 
 
 def test_duplicate_email_is_rejected_case_insensitively(auth, monkeypatch):

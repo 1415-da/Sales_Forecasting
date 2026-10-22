@@ -189,6 +189,8 @@ class ScenarioComparisonResponse(BaseModel):
     scenario_id: str
     baseline_forecast_id: str
     scenario_forecast_id: str
+    #: Model family the comparison ran on (``ensemble``, ``xgboost``, ...).
+    model: Optional[str] = None
     model_version: str
     model_stage: str
     scenario_type: ScenarioType

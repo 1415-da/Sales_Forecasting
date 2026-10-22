@@ -18,6 +18,9 @@ import {
   buildScenarioRequest,
   expandDateRange,
   initialFormState,
+  holidaysInWindow,
+  nextHolidayDate,
+  snapDaysInWindow,
   pctToMultiplier,
   requestSignature,
   scenarioFormReducer,
@@ -92,6 +95,26 @@ describe('result lifecycle', () => {
     expect(next.resultStatus).toBe('stale');
     expect(next.assumptions.discountPct).toBe(40);
     expect(next.touched.discountPct).toBe(true);
+  });
+
+  it('carries a closure end date forward when the shared start date moves past it', () => {
+    const base = state({
+      assumptions: { ...initialFormState().assumptions, startDate: '2026-10-21', endDate: '2026-10-21' },
+    });
+
+    const later = scenarioFormReducer(base, {
+      type: 'setAssumption',
+      field: 'startDate',
+      value: '2026-10-28',
+    });
+    expect(later.assumptions.endDate).toBe('2026-10-28');
+
+    // An end date already after the new start is left alone.
+    const wide = scenarioFormReducer(
+      { ...base, assumptions: { ...base.assumptions, endDate: '2026-11-05' } },
+      { type: 'setAssumption', field: 'startDate', value: '2026-10-28' },
+    );
+    expect(wide.assumptions.endDate).toBe('2026-11-05');
   });
 
   it('marks the result stale when the scenario type changes', () => {
@@ -184,18 +207,41 @@ describe('assumption mapping', () => {
     expect(assumptions.closure_dates).toEqual(['2026-02-01', '2026-02-02', '2026-02-03']);
   });
 
-  it('maps a holiday selection onto its date', () => {
-    const holiday = HOLIDAY_OPTIONS[0]!;
+  it('maps a holiday scenario onto its date window', () => {
     const assumptions = buildAssumptions(
       state({
         scenarioType: 'holiday',
-        assumptions: { ...initialFormState().assumptions, holidayId: holiday.id, intensity: 'high' },
+        assumptions: { ...initialFormState().assumptions, startDate: '2026-10-28', durationDays: 3 },
       }),
     );
 
-    expect(assumptions.start_date).toBe(holiday.date);
-    expect(assumptions.end_date).toBe(holiday.date);
-    expect(assumptions.promotion_intensity).toBe('high');
+    expect(assumptions.start_date).toBe('2026-10-28');
+    expect(assumptions.end_date).toBe('2026-10-30');
+  });
+
+  it.each([
+    ['new_years_day', '2026-10-21', '2027-01-01'],
+    ['mlk_day', '2026-01-01', '2026-01-19'],
+    ['presidents_day', '2026-01-01', '2026-02-16'],
+    ['memorial_day', '2026-01-01', '2026-05-25'],
+    ['independence_day', '2026-07-04', '2026-07-04'],
+    ['labor_day', '2026-01-01', '2026-09-07'],
+    ['columbus_day', '2026-01-01', '2026-10-12'],
+    ['thanksgiving', '2027-01-01', '2027-11-25'],
+  ])('resolves %s on or after %s to %s', (id, from, expected) => {
+    expect(nextHolidayDate(id, from)).toBe(expected);
+  });
+
+  it('lists the public holidays already inside a forecast window', () => {
+    expect(holidaysInWindow('2026-10-21', 30)).toEqual([
+      { label: 'Veterans Day', date: '2026-11-11' },
+    ]);
+    expect(holidaysInWindow('2026-10-21', 60).map((holiday) => holiday.label)).toEqual([
+      'Veterans Day',
+      'Thanksgiving',
+    ]);
+    // Christmas is a closure in this model, not a holiday.
+    expect(HOLIDAY_OPTIONS.some((option) => option.id === 'christmas_day')).toBe(false);
   });
 
   it('maps a custom override to the feature map', () => {
@@ -349,9 +395,9 @@ describe('validation', () => {
     expect(errors.endDate).toBe('End date must be on or after the start date.');
   });
 
-  it('requires a holiday selection', () => {
-    expect(validateForm(state({ scenarioType: 'holiday' })).holidayId).toBe(
-      'Choose a holiday.',
+  it('requires a start date for a holiday window', () => {
+    expect(validateForm(state({ scenarioType: 'holiday' })).startDate).toBe(
+      'Choose a start date.',
     );
   });
 
@@ -405,7 +451,56 @@ describe('validation', () => {
 
   it('declares which fields each scenario type uses', () => {
     expect(FIELDS_BY_SCENARIO_TYPE.closure).toEqual(['startDate', 'endDate']);
-    expect(FIELDS_BY_SCENARIO_TYPE.holiday).toEqual(['holidayId', 'intensity']);
+    expect(FIELDS_BY_SCENARIO_TYPE.holiday).toEqual(['startDate', 'durationDays']);
     expect(FIELDS_BY_SCENARIO_TYPE.traffic).toContain('trafficChangePct');
+  });
+});
+
+describe('model choice and SNAP', () => {
+  it('starts a new model family from its latest version and clears the result', () => {
+    const fresh = state({ resultStatus: 'fresh', modelVersion: '2', idempotency: { signature: 's', key: 'k' } });
+
+    const next = scenarioFormReducer(fresh, { type: 'setModel', value: 'xgboost' });
+
+    expect(next.model).toBe('xgboost');
+    expect(next.modelVersion).toBe('latest');
+    expect(next.resultStatus).toBe('none');
+    expect(next.idempotency).toBeNull();
+  });
+
+  it('sends the chosen model with the request', () => {
+    const request = buildScenarioRequest(state({ storeId: 'TX_2', model: 'lightgbm' }), []);
+    expect(request.model).toBe('lightgbm');
+  });
+
+  it.each(['add', 'remove'] as const)('maps a SNAP %s scenario onto its window', (snapMode) => {
+    const assumptions = buildAssumptions(
+      state({
+        scenarioType: 'snap',
+        assumptions: {
+          ...initialFormState().assumptions,
+          startDate: '2015-12-01',
+          durationDays: 15,
+          snapMode,
+        },
+      }),
+    );
+
+    expect(assumptions.scenario_type).toBe('snap');
+    expect(assumptions.start_date).toBe('2015-12-01');
+    expect(assumptions.end_date).toBe('2015-12-15');
+    expect(assumptions.snap_mode).toBe(snapMode);
+  });
+
+  it("lists a store's SNAP days in a window by its state's schedule", () => {
+    expect(snapDaysInWindow('TX_2', '2015-12-01', 7)).toEqual([
+      '2015-12-01',
+      '2015-12-03',
+      '2015-12-05',
+      '2015-12-06',
+      '2015-12-07',
+    ]);
+    expect(snapDaysInWindow('CA_1', '2015-12-09', 4)).toEqual(['2015-12-09', '2015-12-10']);
+    expect(snapDaysInWindow('ZZ_9', '2015-12-01', 7)).toEqual([]);
   });
 });

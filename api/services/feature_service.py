@@ -29,10 +29,19 @@ same calendar rather than carried or zeroed.
 With those corrections the three Production models reproduce the history level
 without any post-hoc calibration, so no calibration is applied here.
 
-The honest consequence, recorded in every response: because ``quantity_sold`` is
-the target under another name, the model leans heavily on it, and a forecast
-driven by a lag-1 proxy behaves largely as a persistence forecast. That is a
-property of the trained model, not of this module.
+The honest consequence, recorded in every response from such a model: because
+``quantity_sold`` is the target under another name, the model leans heavily on
+it, and a forecast driven by a lag-1 proxy behaves largely as a persistence
+forecast. That is a property of the trained model, not of this module.
+
+Models trained without those columns instead use two calendar drivers that are
+known in advance for any date, and are therefore also scenario levers:
+
+* ``is_closed`` -- Christmas Day, when every M5 store is closed. Such a model's
+  ``is_holiday`` excludes that day, exactly as training did.
+* ``snap_day`` -- the store's state SNAP benefit day. M5 issues SNAP on fixed
+  days of the month per state (``SNAP_DAYS_BY_STATE``, checked against the M5
+  calendar by the test suite).
 """
 
 from __future__ import annotations
@@ -75,6 +84,20 @@ _CALENDAR_FEATURES = (
     "dayofweek_cos",
 )
 
+#: Calendar features that also depend on the store (its state's SNAP schedule).
+_STORE_CALENDAR_FEATURES = ("snap_day",)
+
+#: Christmas Day: the one date every M5 store is closed.
+CLOSED_MONTH_DAY = (12, 25)
+
+#: Days of the month SNAP benefits are issued, per state. M5's calendar uses
+#: the same days in every month of every year for each state.
+SNAP_DAYS_BY_STATE: Dict[str, frozenset] = {
+    "CA": frozenset(range(1, 11)),
+    "TX": frozenset({1, 3, 5, 6, 7, 9, 11, 12, 13, 15}),
+    "WI": frozenset({2, 3, 5, 6, 8, 9, 11, 12, 14, 15}),
+}
+
 #: Same-day measures rebuilt from the previous day's sales level.
 _SALES_PROPORTIONAL_FEATURES = ("quantity_sold", "profit")
 
@@ -108,6 +131,8 @@ class ExogenousPolicy:
     quantity_to_sales_ratio: float
     carried_values: Dict[str, float] = field(default_factory=dict)
     imputed: Tuple[str, ...] = ()
+    #: Two-letter state prefix of the store (``CA_1`` -> ``CA``), for SNAP.
+    store_state: Optional[str] = None
 
     def sales_proportional(self, feature: str, sales_level: float) -> float:
         """Value of a sales-proportional feature at a given sales level."""
@@ -171,6 +196,8 @@ class FeatureBuilder:
 
         known = (
             set(_CALENDAR_FEATURES)
+            | {"is_closed"}
+            | set(_STORE_CALENDAR_FEATURES)
             | set(_SALES_PROPORTIONAL_FEATURES)
             | set(_CARRIED_FEATURES)
             | {STORE_ENCODER_KEY}
@@ -189,6 +216,16 @@ class FeatureBuilder:
                 unknown.append(column)
 
         return sorted(set(lags)), sorted(set(windows)), unknown
+
+    @property
+    def uses_same_day_columns(self) -> bool:
+        """
+        Whether this model was trained on same-day columns tied to the target.
+
+        Only such a model needs ``LEAKAGE_WARNING``; telling the user a model
+        reads the answer back when it does not would be its own inaccuracy.
+        """
+        return any(column in self.feature_cols for column in _SALES_PROPORTIONAL_FEATURES)
 
     @property
     def required_history_days(self) -> int:
@@ -344,12 +381,15 @@ class FeatureBuilder:
 
     # -- exogenous policy --------------------------------------------------
 
-    def build_policy(self, series: HistorySeries) -> ExogenousPolicy:
+    def build_policy(
+        self, series: HistorySeries, store_id: Optional[str] = None
+    ) -> ExogenousPolicy:
         """
         Decide how to produce each non-derivable input, given this history.
 
         A ratio observed in the caller's own data beats the configured default,
         so a dataset with different economics still gets consistent inputs.
+        ``store_id`` is needed only by store-dependent calendar features.
         """
         imputed: List[str] = []
 
@@ -377,11 +417,17 @@ class FeatureBuilder:
                 carried[column] = 0.0
                 imputed.append(column)
 
+        store_state = str(store_id)[:2].upper() if store_id else None
+        if "snap_day" in self.feature_cols and store_state not in SNAP_DAYS_BY_STATE:
+            # Unknown state: no SNAP days, the value most training days held.
+            imputed.append("snap_day")
+
         return ExogenousPolicy(
             profit_to_sales_ratio=profit_ratio,
             quantity_to_sales_ratio=quantity_ratio,
             carried_values=carried,
             imputed=tuple(imputed),
+            store_state=store_state,
         )
 
     # -- store -------------------------------------------------------------
@@ -486,6 +532,14 @@ class FeatureBuilder:
         """
         row: Dict[str, float] = {}
         row.update(self.calendar_features(target_date))
+        if "is_closed" in self.feature_cols:
+            closed = (target_date.month, target_date.day) == CLOSED_MONTH_DAY
+            row["is_closed"] = 1.0 if closed else 0.0
+            # Training zeroes the holiday flag on a closed day; match it.
+            if closed:
+                row["is_holiday"] = 0.0
+        if "snap_day" in self.feature_cols:
+            row["snap_day"] = 1.0 if is_snap_day(policy.store_state, target_date) else 0.0
         row.update(self.lag_features(sales_series))
         row.update(self.rolling_features(sales_series))
 
@@ -571,6 +625,12 @@ def _statistic(sample: Sequence[float], statistic: str) -> float:
     raise KeyError(statistic)
 
 
+def is_snap_day(state: Optional[str], target_date: date) -> bool:
+    """Whether ``target_date`` is a SNAP benefit day in ``state``."""
+    days = SNAP_DAYS_BY_STATE.get((state or "").upper())
+    return bool(days) and target_date.day in days
+
+
 _HOLIDAY_CACHE: Dict[int, Any] = {}
 _HOLIDAY_UNAVAILABLE = False
 
@@ -609,9 +669,12 @@ def is_us_holiday(target_date: date) -> bool:
 
 __all__ = [
     "CARRY_WINDOW_DAYS",
+    "CLOSED_MONTH_DAY",
     "LEAKAGE_WARNING",
+    "SNAP_DAYS_BY_STATE",
     "ExogenousPolicy",
     "FeatureBuilder",
     "HistorySeries",
+    "is_snap_day",
     "is_us_holiday",
 ]

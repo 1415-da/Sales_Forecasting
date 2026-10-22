@@ -43,9 +43,14 @@ export default function HomePage() {
             </span>
           </Link>
 
-          <Link href="/login" className={buttonVariants({ variant: 'outline', size: 'sm' })}>
-            Sign in
-          </Link>
+          <nav className="flex items-center gap-2">
+            <Link href="/login" className={buttonVariants({ variant: 'ghost', size: 'sm' })}>
+              Sign in
+            </Link>
+            <Link href="/register" className={buttonVariants({ size: 'sm' })}>
+              Sign up
+            </Link>
+          </nav>
         </header>
 
         <section className="flex flex-1 items-center py-12 sm:py-16 lg:py-20">
@@ -63,8 +68,8 @@ export default function HomePage() {
               </p>
 
               <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-                <Link href="/login" className={buttonVariants({ size: 'lg' })}>
-                  Sign in to the platform
+                <Link href="/register" className={buttonVariants({ size: 'lg' })}>
+                  Create your account
                   <ArrowRight aria-hidden="true" className="h-4 w-4" />
                 </Link>
                 <a
@@ -76,7 +81,11 @@ export default function HomePage() {
               </div>
 
               <p className="mt-4 text-xs text-muted-foreground">
-                Access is managed by your platform administrator.
+                New here? Sign up first. Already have an account?{' '}
+                <Link href="/login" className="font-medium underline underline-offset-4">
+                  Sign in
+                </Link>
+                .
               </p>
             </div>
 

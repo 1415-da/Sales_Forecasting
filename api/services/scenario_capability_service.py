@@ -96,6 +96,12 @@ SCENARIO_FEATURE_REQUIREMENTS: Dict[ScenarioType, FeatureRequirement] = {
         mode=RequirementMode.ANY,
         description="Needs a price or discount feature.",
     ),
+    ScenarioType.SNAP: FeatureRequirement(
+        scenario_type=ScenarioType.SNAP,
+        candidates=("snap_day",),
+        mode=RequirementMode.ANY,
+        description="Needs a SNAP benefit-day feature.",
+    ),
     ScenarioType.CUSTOM: FeatureRequirement(
         scenario_type=ScenarioType.CUSTOM,
         candidates=(),
@@ -148,6 +154,7 @@ class ScenarioCapabilityService:
         self,
         model_version: str = DEFAULT_MODEL_VERSION,
         requested_overrides: Optional[Iterable[str]] = None,
+        model: Optional[str] = None,
     ) -> ScenarioCapabilitiesResponse:
         """
         Capabilities for every known scenario type under ``model_version``.
@@ -160,7 +167,7 @@ class ScenarioCapabilityService:
         the caller can return a precise error instead of a misleading
         "nothing supported" payload.
         """
-        schema = self.feature_schema_service.get_feature_schema(model_version)
+        schema = self._schema_for(model_version, model)
         overrides = list(requested_overrides) if requested_overrides is not None else None
 
         capabilities = [
@@ -176,6 +183,7 @@ class ScenarioCapabilityService:
             )
 
         return ScenarioCapabilitiesResponse(
+            model=model,
             model_version=schema.model_version,
             feature_schema_version=schema.schema_version,
             run_id=schema.run_id,
@@ -184,6 +192,23 @@ class ScenarioCapabilityService:
             capabilities=capabilities,
             warnings=warnings,
         )
+
+    def _schema_for(self, model_version: str, model: Optional[str]) -> FeatureSchema:
+        """
+        The feature schema of ``model_version`` of one model family.
+
+        Each family is its own registered model with its own version numbers, so
+        the version is resolved to its training run through that family's
+        registry entry, and the schema is read from the run. The reported
+        version stays the one the caller asked about, not the run id.
+        """
+        if not model:
+            return self.feature_schema_service.get_feature_schema(model_version)
+        from api.services.baseline_forecast_service import MlflowModelResolver
+
+        resolved = MlflowModelResolver().resolve(model_version, model=model)
+        schema = self.feature_schema_service.get_feature_schema(resolved.run_id)
+        return schema.model_copy(update={"model_version": resolved.model_version})
 
     def get_capability(
         self,

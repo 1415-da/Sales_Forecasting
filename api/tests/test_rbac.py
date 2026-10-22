@@ -289,3 +289,61 @@ def test_public_routes_stay_public(client):
     with TestClient(app, raise_server_exceptions=False) as bare:
         assert bare.get("/health", params={"deep": "false"}).status_code == 200
         assert bare.get("/auth/config").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("role", "audit_status"), [("ANALYST", 403), ("ML_ENGINEER", 200)]
+)
+def test_the_role_chosen_at_sign_up_is_what_the_api_enforces(monkeypatch, role, audit_status):
+    """
+    Sign up through the real route, then use the token it returns.
+
+    The audit log separates the two roles: an ML engineer may read it, an
+    analyst may not -- so the chosen role, not just its label, is in force.
+    """
+    import uuid
+
+    monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
+    monkeypatch.delenv("SELF_REGISTRATION_ROLES", raising=False)
+    app = create_app()
+    app.dependency_overrides.clear()
+    with TestClient(app, raise_server_exceptions=False) as bare:
+        config = bare.get("/auth/config").json()
+        assert role in config["self_registration_roles"]
+        assert "ADMIN" not in config["self_registration_roles"]
+
+        signed_up = bare.post(
+            "/auth/register",
+            json={
+                "email": f"signup-{uuid.uuid4().hex[:8]}@example.com",
+                "full_name": "Sign Up",
+                "password": "Str0ng-Passw0rd!x",
+                "role": role,
+            },
+        )
+        assert signed_up.status_code == 201, signed_up.text
+        assert signed_up.json()["user"]["role"] == role
+
+        headers = {"Authorization": f"Bearer {signed_up.json()['access_token']}"}
+        assert bare.get("/v1/admin/audit-logs", headers=headers).status_code == audit_status
+
+
+def test_admin_is_refused_at_the_sign_up_route(monkeypatch):
+    import uuid
+
+    monkeypatch.setenv("ALLOW_SELF_REGISTRATION", "true")
+    monkeypatch.delenv("SELF_REGISTRATION_ROLES", raising=False)
+    app = create_app()
+    app.dependency_overrides.clear()
+    with TestClient(app, raise_server_exceptions=False) as bare:
+        response = bare.post(
+            "/auth/register",
+            json={
+                "email": f"eve-{uuid.uuid4().hex[:8]}@example.com",
+                "full_name": "Eve",
+                "password": "Str0ng-Passw0rd!x",
+                "role": "ADMIN",
+            },
+        )
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "ROLE_NOT_SELF_ASSIGNABLE"

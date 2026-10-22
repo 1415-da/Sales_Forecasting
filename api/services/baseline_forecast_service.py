@@ -34,6 +34,7 @@ from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Protocol, Sequence, runtime_checkable
 
+from api.config import get_settings
 from api.schemas.baseline_forecast import (
     UNKNOWN_LINEAGE_VALUE,
     BaselineDailyForecast,
@@ -139,6 +140,9 @@ class ResolvedModel:
     run_id: Optional[str] = None
     data_source: str = UNKNOWN_LINEAGE_VALUE
     dataset_version: str = UNKNOWN_LINEAGE_VALUE
+    #: Model family (``ensemble``, ``xgboost``, ``lightgbm``) the version
+    #: belongs to; each is a separately registered model.
+    model: str = "ensemble"
 
     @property
     def is_production(self) -> bool:
@@ -161,8 +165,12 @@ class PredictionResult:
 class ModelResolver(Protocol):
     """Resolves a model version reference to a concrete, staged model."""
 
-    def resolve(self, model_version: str) -> ResolvedModel:
-        """Return the resolved model, or raise ``BaselineForecastError``."""
+    def resolve(self, model_version: str, model: Optional[str] = None) -> ResolvedModel:
+        """
+        Return the resolved model, or raise ``BaselineForecastError``.
+
+        ``model`` names the model family; omitted means the resolver's default.
+        """
         ...
 
 
@@ -210,6 +218,13 @@ class MlflowModelResolver:
             MLFLOW_REGISTERED_MODEL_ENV_VAR, DEFAULT_REGISTERED_MODEL_NAME
         )
         self.tracking_uri = tracking_uri or os.getenv("MLFLOW_TRACKING_URI")
+        prefix = get_settings().registered_model_prefix
+        #: The family this resolver serves when a request names none.
+        self.model_family = (
+            self.registered_model_name[len(prefix):]
+            if self.registered_model_name.startswith(prefix)
+            else get_settings().default_model
+        )
 
     def _client(self) -> Any:
         """Build an MlflowClient, converting connection failures to a typed error."""
@@ -227,20 +242,25 @@ class MlflowModelResolver:
                 details={"tracking_uri": self.tracking_uri, "error": str(exc)},
             ) from exc
 
-    def resolve(self, model_version: str) -> ResolvedModel:
+    def resolve(self, model_version: str, model: Optional[str] = None) -> ResolvedModel:
         """Resolve a version reference (or ``latest``) to a staged model."""
         client = self._client()
         requested = (model_version or DEFAULT_MODEL_VERSION).strip()
+        # Each model family is its own registered model, so the family decides
+        # which version list "latest" and "14" are looked up in.
+        registered_model_name = (
+            get_settings().registered_model_name(model) if model else self.registered_model_name
+        )
 
         try:
-            versions = client.search_model_versions(f"name='{self.registered_model_name}'")
+            versions = client.search_model_versions(f"name='{registered_model_name}'")
         except Exception as exc:  # noqa: BLE001 - surfaced as a structured error
             raise BaselineForecastError(
                 BaselineForecastErrorCode.MLFLOW_UNAVAILABLE,
                 "Could not query the MLflow model registry.",
                 field_name="model_version",
                 details={
-                    "registered_model_name": self.registered_model_name,
+                    "registered_model_name": registered_model_name,
                     "error": str(exc),
                 },
             ) from exc
@@ -253,7 +273,7 @@ class MlflowModelResolver:
                     "No Production model version is available.",
                     field_name="model_version",
                     details={
-                        "registered_model_name": self.registered_model_name,
+                        "registered_model_name": registered_model_name,
                         "available_versions": [v.version for v in versions],
                     },
                 )
@@ -267,7 +287,7 @@ class MlflowModelResolver:
                     field_name="model_version",
                     details={
                         "model_version": requested,
-                        "registered_model_name": self.registered_model_name,
+                        "registered_model_name": registered_model_name,
                         "available_versions": [v.version for v in versions],
                     },
                 )
@@ -280,6 +300,7 @@ class MlflowModelResolver:
             run_id=chosen.run_id,
             data_source=lineage.get("data.source", UNKNOWN_LINEAGE_VALUE),
             dataset_version=lineage.get("data.version", UNKNOWN_LINEAGE_VALUE),
+            model=model or self.model_family,
         )
 
     @staticmethod
@@ -334,7 +355,7 @@ class CanonicalForecastPredictor:
         # pipeline wants the registry's type. They describe the same version, so
         # this is a projection rather than a second lookup.
         resolved = ResolvedModelVersion(
-            model=self.model_type,
+            model=model.model or self.model_type,
             registered_model_name="",
             version=model.model_version,
             stage=model.model_stage,
@@ -369,7 +390,15 @@ class CanonicalForecastPredictor:
         return PredictionResult(
             predictions=[value for _, value in projection.predictions],
             supports_quantiles=False,
-            warnings=[*projection.warnings, LEAKAGE_WARNING],
+            warnings=[
+                *projection.warnings,
+                *(
+                    [LEAKAGE_WARNING]
+                    if projection.builder is not None
+                    and projection.builder.uses_same_day_columns
+                    else []
+                ),
+            ],
         )
 
 
@@ -463,7 +492,9 @@ class BaselineForecastService:
         moves it to ``failed`` and the original error is re-raised.
         """
         self._validate_history(request)
-        model = self._resolve_model(request.model_version or DEFAULT_MODEL_VERSION)
+        model = self._resolve_model(
+            request.model_version or DEFAULT_MODEL_VERSION, request.model
+        )
         feature_schema_version = self._resolve_feature_schema_version(model)
 
         history_start = request.history[0].date
@@ -491,6 +522,7 @@ class BaselineForecastService:
             response = BaselineForecastResponse(
                 baseline_forecast_id=checkpoint.forecast_id,
                 store_id=request.store_id,
+                model=model.model,
                 model_version=model.model_version,
                 model_stage=model.model_stage,
                 horizon_days=request.horizon_days,
@@ -537,9 +569,13 @@ class BaselineForecastService:
                 details={"validation_error_code": exc.error_code, **exc.details},
             ) from exc
 
-    def _resolve_model(self, model_version: str) -> ResolvedModel:
+    def _resolve_model(self, model_version: str, model_family: Optional[str] = None) -> ResolvedModel:
         """Resolve the model version and enforce the Production-stage policy."""
-        model = self.model_resolver.resolve(model_version)
+        model = (
+            self.model_resolver.resolve(model_version, model=model_family)
+            if model_family
+            else self.model_resolver.resolve(model_version)
+        )
 
         if self.require_production_stage and not model.is_production:
             raise BaselineForecastError(
@@ -585,6 +621,7 @@ class BaselineForecastService:
             return self.checkpoint_service.create(
                 forecast_id=new_forecast_id(),
                 store_id=request.store_id,
+                model=model.model,
                 model_version=model.model_version,
                 model_stage=model.model_stage,
                 horizon_days=request.horizon_days,

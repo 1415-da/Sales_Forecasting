@@ -26,8 +26,17 @@ export interface ModelOption {
   stage?: string | null;
 }
 
+export interface ModelFamilyOption {
+  id: string;
+  label: string;
+}
+
 export interface ScenarioContextCardProps {
   stores: StoreOption[];
+  /** Model families to choose from (Ensemble, XGBoost, LightGBM). */
+  modelFamilies?: ModelFamilyOption[];
+  model?: string;
+  onModelFamilyChange?: (value: string) => void;
   models: ModelOption[];
   storeId: string;
   horizonDays: HorizonDays;
@@ -48,6 +57,9 @@ export interface ScenarioContextCardProps {
 
 export function ScenarioContextCard({
   stores,
+  modelFamilies = [],
+  model,
+  onModelFamilyChange,
   models,
   storeId,
   horizonDays,
@@ -108,6 +120,27 @@ export function ScenarioContextCard({
             }))}
           />
         </fieldset>
+
+        {modelFamilies.length > 0 && onModelFamilyChange ? (
+          <div className="space-y-1.5">
+            <Label htmlFor="scenario-model-family">Model</Label>
+            <Select
+              id="scenario-model-family"
+              value={model}
+              onChange={(event) => onModelFamilyChange(event.target.value)}
+              disabled={isLoading}
+            >
+              {modelFamilies.map((family) => (
+                <option key={family.id} value={family.id}>
+                  {family.label}
+                </option>
+              ))}
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              Run the same scenario on another model to see whether they agree.
+            </p>
+          </div>
+        ) : null}
 
         <div className="space-y-1.5">
           <Label htmlFor="scenario-model">Model version</Label>

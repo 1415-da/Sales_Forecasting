@@ -152,9 +152,34 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
+#: Nullable columns added after a table first shipped. ``create_all`` never
+#: alters an existing table, so a database created before one of these exists
+#: gets it here; each also has an Alembic revision for migrated deployments.
+ADDITIVE_COLUMNS = (
+    ("scenario_baseline_forecasts", "model", "VARCHAR(32)"),
+)
+
+
+def ensure_additive_columns() -> None:
+    """Add any missing nullable column from ``ADDITIVE_COLUMNS``. Only ever adds."""
+    from sqlalchemy import inspect, text
+
+    engine = get_engine()
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    for table, column, ddl_type in ADDITIVE_COLUMNS:
+        if table not in tables:
+            continue
+        if column in {item["name"] for item in inspector.get_columns(table)}:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
+        logger.info("Added column %s.%s", table, column)
+
+
 def ensure_tables_once() -> None:
     """
-    Create missing tables, swallowing failure.
+    Create missing tables and additive columns, swallowing failure.
 
     Called at application start so a fresh local database works immediately.
     A failure here must not stop the process: the health endpoint reports the
@@ -162,6 +187,7 @@ def ensure_tables_once() -> None:
     """
     try:
         create_all()
+        ensure_additive_columns()
     except Exception as exc:  # noqa: BLE001 - startup must not fail on this
         logger.warning("Could not ensure database schema at startup: %s", exc)
 

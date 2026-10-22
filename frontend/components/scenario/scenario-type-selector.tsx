@@ -1,6 +1,6 @@
 'use client';
 
-import { CalendarDays, DoorClosed, PercentCircle, Sliders, Users } from 'lucide-react';
+import { CalendarDays, DoorClosed, HandCoins, PercentCircle, Sliders, Users } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
@@ -41,9 +41,15 @@ const OPTIONS: ScenarioTypeOption[] = [
     icon: CalendarDays,
   },
   {
+    type: 'snap',
+    label: 'SNAP benefit days',
+    description: 'Add or remove benefit-payment days',
+    icon: HandCoins,
+  },
+  {
     type: 'custom',
-    label: 'Custom override',
-    description: 'Set a feature directly',
+    label: 'Advanced: custom override',
+    description: 'Set a model feature directly',
     icon: Sliders,
   },
 ];
@@ -51,7 +57,12 @@ const OPTIONS: ScenarioTypeOption[] = [
 export interface ScenarioTypeSelectorProps {
   value: ScenarioType;
   onChange: (value: ScenarioType) => void;
-  /** Types the selected model supports. Others render disabled with a reason. */
+  /**
+   * Types the selected model supports. Others are not shown at all: a lever
+   * the model cannot express is not a choice, and showing it disabled only
+   * invites "why can't I use this?". A future model trained on, say, real
+   * promotion data brings its lever back with no code change.
+   */
   supportedTypes?: ScenarioType[];
   unsupportedReason?: (type: ScenarioType) => string | null;
   isLoading?: boolean;
@@ -64,11 +75,9 @@ export function ScenarioTypeSelector({
   unsupportedReason,
   isLoading = false,
 }: ScenarioTypeSelectorProps) {
-  // Custom override is hidden entirely unless the model supports it, since an
-  // always-visible-but-disabled escape hatch invites support questions.
+  // Until capabilities load, every option is listed (disabled by isLoading).
   const visible = OPTIONS.filter(
-    (option) =>
-      option.type !== 'custom' || !supportedTypes || supportedTypes.includes('custom'),
+    (option) => !supportedTypes || supportedTypes.includes(option.type),
   );
 
   const isSupported = (type: ScenarioType) =>

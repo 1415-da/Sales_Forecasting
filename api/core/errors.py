@@ -70,6 +70,7 @@ class ScenarioErrorCode(str, Enum):
     ACCOUNT_LOCKED = "ACCOUNT_LOCKED"
     PERMISSION_DENIED = "PERMISSION_DENIED"
     REGISTRATION_DISABLED = "REGISTRATION_DISABLED"
+    ROLE_NOT_SELF_ASSIGNABLE = "ROLE_NOT_SELF_ASSIGNABLE"
     EMAIL_ALREADY_REGISTERED = "EMAIL_ALREADY_REGISTERED"
     WEAK_PASSWORD = "WEAK_PASSWORD"
     RATE_LIMITED = "RATE_LIMITED"
@@ -110,6 +111,7 @@ ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
     ScenarioErrorCode.ACCOUNT_LOCKED: 423,
     ScenarioErrorCode.PERMISSION_DENIED: 403,
     ScenarioErrorCode.REGISTRATION_DISABLED: 403,
+    ScenarioErrorCode.ROLE_NOT_SELF_ASSIGNABLE: 403,
     ScenarioErrorCode.EMAIL_ALREADY_REGISTERED: 409,
     ScenarioErrorCode.WEAK_PASSWORD: 422,
     ScenarioErrorCode.RATE_LIMITED: 429,
@@ -503,6 +505,15 @@ class RegistrationDisabledError(ScenarioPlannerError):
     code = ScenarioErrorCode.REGISTRATION_DISABLED
     default_message = (
         "Self-registration is disabled. Ask an administrator for an account."
+    )
+
+
+class RoleNotSelfAssignableError(ScenarioPlannerError):
+    """The requested role is not one a user may choose at sign-up. -> 403"""
+
+    code = ScenarioErrorCode.ROLE_NOT_SELF_ASSIGNABLE
+    default_message = (
+        "That role cannot be chosen at sign-up. Ask an administrator for it."
     )
 
 

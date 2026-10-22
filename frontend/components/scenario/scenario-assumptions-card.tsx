@@ -7,9 +7,10 @@ import { RadioGroup } from '@/components/ui/radio-group';
 import { Select } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import {
-  HOLIDAY_OPTIONS,
   IMPACT_LEVELS,
   MAX_PROMOTION_DURATION_DAYS,
+  holidaysInWindow,
+  snapDaysInWindow,
   TRAFFIC_LIFT_MAX,
   TRAFFIC_LIFT_MIN,
   TRAFFIC_PCT_MAX,
@@ -29,6 +30,11 @@ export interface ScenarioAssumptionsCardProps {
   /** Features the model exposes, for the custom-override picker. */
   availableFeatures?: string[];
   maxDurationDays?: number;
+  /** First forecast day and horizon, to list the holidays already in the baseline. */
+  forecastStartDate?: string;
+  horizonDays?: number;
+  /** Selected store, whose state decides its SNAP benefit days. */
+  storeId?: string;
 }
 
 /** A labelled field with inline error wiring, so every input is described. */
@@ -73,7 +79,12 @@ export function ScenarioAssumptionsCard({
   errors = {},
   availableFeatures = [],
   maxDurationDays = MAX_PROMOTION_DURATION_DAYS,
+  forecastStartDate,
+  horizonDays,
+  storeId = '',
 }: ScenarioAssumptionsCardProps) {
+  const baselineHolidays =
+    forecastStartDate && horizonDays ? holidaysInWindow(forecastStartDate, horizonDays) : [];
   const describedBy = (field: string, hasHint: boolean) =>
     [errors[field] ? `${field}-error` : null, hasHint ? `${field}-hint` : null]
       .filter(Boolean)
@@ -223,37 +234,44 @@ export function ScenarioAssumptionsCard({
 
         {scenarioType === 'holiday' ? (
           <>
-            <Field id="holidayId" label="Holiday" error={errors.holidayId}>
-              <Select
-                id="holidayId"
-                value={assumptions.holidayId}
-                aria-invalid={Boolean(errors.holidayId)}
-                aria-describedby={describedBy('holidayId', false)}
-                onChange={(event) => onChange('holidayId', event.target.value)}
-                onBlur={() => onBlur?.('holidayId')}
-              >
-                <option value="">Select a holiday…</option>
-                {HOLIDAY_OPTIONS.map((holiday) => (
-                  <option key={holiday.id} value={holiday.id}>
-                    {holiday.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
+            {startDateField('First holiday day')}
+            {durationField}
+            <p className="text-xs text-muted-foreground">
+              Treats these days as a public holiday, for a local holiday or a
+              store event.{' '}
+              {baselineHolidays.length > 0
+                ? `Public holidays in this forecast are already in the baseline: ${baselineHolidays
+                    .map((holiday) => `${holiday.label} (${holiday.date})`)
+                    .join(', ')}.`
+                : 'US public holidays are already part of the baseline.'}
+            </p>
+          </>
+        ) : null}
 
+        {scenarioType === 'snap' ? (
+          <>
             <fieldset className="space-y-1.5">
-              <legend className="text-sm font-medium leading-none">Impact level</legend>
+              <legend className="text-sm font-medium leading-none">Change</legend>
               <RadioGroup
-                name="holiday-impact"
-                aria-label="Holiday impact level"
-                value={assumptions.intensity}
-                onValueChange={(value) => onChange('intensity', value)}
-                options={IMPACT_LEVELS.map((level) => ({
-                  value: level,
-                  label: humanizeIdentifier(level),
-                }))}
+                name="snap-mode"
+                aria-label="Add or remove SNAP benefit days"
+                value={assumptions.snapMode}
+                onValueChange={(value) => onChange('snapMode', value)}
+                options={[
+                  { value: 'add', label: 'Add benefit days', hint: 'Treat these days as SNAP days' },
+                  {
+                    value: 'remove',
+                    label: 'Remove benefit days',
+                    hint: 'As if benefits were delayed',
+                  },
+                ]}
               />
             </fieldset>
+            {startDateField('First day')}
+            {durationField}
+            <p className="text-xs text-muted-foreground">
+              {snapNote(storeId, assumptions.startDate, assumptions.durationDays, assumptions.snapMode)}
+            </p>
           </>
         ) : null}
 
@@ -324,4 +342,26 @@ export function ScenarioAssumptionsCard({
       </CardContent>
     </Card>
   );
+}
+
+/**
+ * Which of the chosen days are already SNAP days for this store.
+ *
+ * Adding benefit days only changes days that are not SNAP days yet, and
+ * removing them only changes days that are; saying which is which up front
+ * saves a run that would change nothing.
+ */
+function snapNote(storeId: string, startDate: string, durationDays: number, mode: string): string {
+  if (!storeId) return 'Choose a store to see its SNAP benefit days.';
+  const state = storeId.slice(0, 2).toUpperCase();
+  const existing = snapDaysInWindow(storeId, startDate, Math.max(1, durationDays));
+  const listed = existing.map((day) => day.slice(5)).join(', ');
+  if (mode === 'remove') {
+    return existing.length > 0
+      ? `${state} SNAP days in this window: ${listed}. Only these days change.`
+      : `None of these days are ${state} SNAP days, so removing benefits changes nothing.`;
+  }
+  return existing.length > 0
+    ? `${state} SNAP days already in this window: ${listed}. The other days change.`
+    : `None of these days are ${state} SNAP days yet, so every day changes.`;
 }

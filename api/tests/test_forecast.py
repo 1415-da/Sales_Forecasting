@@ -452,6 +452,145 @@ def test_reconstructed_inputs_are_declared(forecast_service):
     assert any("grows across the horizon" in warning for warning in response.warnings)
 
 
+# --------------------------------------------------------------------------
+# Leak-free feature contract (is_closed, snap_day, no same-day columns)
+# --------------------------------------------------------------------------
+
+#: The contract a model trained without same-day target columns carries.
+LEAK_FREE_FEATURE_COLS = [
+    column
+    for column in TRAINED_FEATURE_COLS
+    if column not in ("quantity_sold", "profit", "has_promotion", "customer_traffic")
+] + ["is_closed", "snap_day"]
+
+
+def test_leak_free_contract_is_fully_buildable(settings, bundle_factory):
+    """Every column of the new contract is derivable, and nothing else is added."""
+    builder = FeatureBuilder(bundle_factory(feature_cols=LEAK_FREE_FEATURE_COLS), settings)
+    assert builder.unknown_features == []
+    assert builder.uses_same_day_columns is False
+
+    series = builder.read_history(make_history(days=60))
+    policy = builder.build_policy(series, store_id="CA_1")
+    row = builder.build_row(date(2026, 10, 21), series.sales, 0.0, policy)
+    assert sorted(row) == sorted(LEAK_FREE_FEATURE_COLS)
+
+
+def test_christmas_is_a_closure_not_a_holiday(settings, bundle_factory):
+    """
+    Training zeroes ``is_holiday`` on a closed day, so serving must as well.
+
+    Otherwise the model would see a combination it never trained on.
+    """
+    builder = FeatureBuilder(bundle_factory(feature_cols=LEAK_FREE_FEATURE_COLS), settings)
+    series = builder.read_history(make_history(days=60))
+    policy = builder.build_policy(series, store_id="CA_1")
+
+    christmas = builder.build_row(date(2026, 12, 25), series.sales, 0.0, policy)
+    thanksgiving = builder.build_row(date(2026, 11, 26), series.sales, 0.0, policy)
+    assert (christmas["is_closed"], christmas["is_holiday"]) == (1.0, 0.0)
+    assert (thanksgiving["is_closed"], thanksgiving["is_holiday"]) == (0.0, 1.0)
+
+
+def test_christmas_stays_a_holiday_for_a_model_without_is_closed(settings, bundle_factory):
+    """A model trained before ``is_closed`` existed keeps its own inputs exactly."""
+    builder = FeatureBuilder(bundle_factory(), settings)
+    series = builder.read_history(make_history(days=60))
+    policy = builder.build_policy(series)
+    row = builder.build_row(date(2026, 12, 25), series.sales, 0.0, policy)
+    assert row["is_holiday"] == 1.0
+    assert "is_closed" not in row
+
+
+@pytest.mark.parametrize(
+    ("store_id", "snap_dates", "other_dates"),
+    [
+        ("CA_2", [date(2026, 11, 1), date(2026, 11, 10)], [date(2026, 11, 11)]),
+        ("TX_1", [date(2026, 11, 3), date(2026, 11, 15)], [date(2026, 11, 2)]),
+        ("WI_3", [date(2026, 11, 2), date(2026, 11, 14)], [date(2026, 11, 1)]),
+    ],
+)
+def test_snap_day_follows_the_store_state_schedule(
+    settings, bundle_factory, store_id, snap_dates, other_dates
+):
+    """SNAP days depend on the store's state, not just the date."""
+    builder = FeatureBuilder(bundle_factory(feature_cols=LEAK_FREE_FEATURE_COLS), settings)
+    series = builder.read_history(make_history(days=60))
+    policy = builder.build_policy(series, store_id=store_id)
+    for day in snap_dates:
+        assert builder.build_row(day, series.sales, 0.0, policy)["snap_day"] == 1.0
+    for day in other_dates:
+        assert builder.build_row(day, series.sales, 0.0, policy)["snap_day"] == 0.0
+
+
+def test_snap_schedule_matches_the_m5_calendar():
+    """
+    The hard-coded schedule is the one training learned from.
+
+    Training reads SNAP from M5's ``calendar.csv``; serving cannot, so it uses
+    ``SNAP_DAYS_BY_STATE``. This pins the two together wherever the dataset is
+    present.
+    """
+    import csv
+    from pathlib import Path
+
+    from api.services.feature_service import SNAP_DAYS_BY_STATE
+
+    calendar = (
+        Path(__file__).resolve().parents[2]
+        / "data" / "raw" / "kaggle_m5" / "v1.0.0" / "calendar.csv"
+    )
+    if not calendar.exists():
+        pytest.skip("M5 calendar.csv is not available in this checkout")
+
+    observed = {state: set() for state in SNAP_DAYS_BY_STATE}
+    with calendar.open() as handle:
+        for record in csv.DictReader(handle):
+            day = int(record["date"][-2:])
+            for state in observed:
+                if record[f"snap_{state}"] == "1":
+                    observed[state].add(day)
+    assert observed == {state: set(days) for state, days in SNAP_DAYS_BY_STATE.items()}
+
+
+class _ClosureAwareEstimator:
+    """Sells nothing on a closed day, otherwise repeats yesterday (persistence)."""
+
+    def predict(self, frame):
+        return [
+            0.0 if closed >= 0.5 else float(lag)
+            for closed, lag in zip(frame["is_closed"], frame["sales_lag_1"])
+        ]
+
+
+def test_a_closed_day_does_not_drag_down_the_days_after_it(forecast_service, bundle_factory):
+    """
+    Christmas forecasts as ~0, but the day after starts from the open level.
+
+    Feeding the closed day's 0 into lag-1 would make a persistence model forecast
+    0 for every day after Christmas -- the artefact this rule exists to stop.
+    """
+    service = forecast_service(
+        bundle_factory(model=_ClosureAwareEstimator(), feature_cols=LEAK_FREE_FEATURE_COLS)
+    )
+    history = make_history(days=60, end=date(2026, 12, 22), level=3000.0)
+    response = service.generate(make_request(history=history, horizon_days=6))
+
+    by_date = {point.date: point.predicted_sales for point in response.forecasts}
+    level = history[-1].sales
+    assert by_date[date(2026, 12, 25)] == 0.0
+    assert by_date[date(2026, 12, 26)] == pytest.approx(level)
+    assert by_date[date(2026, 12, 27)] == pytest.approx(level)
+
+
+def test_leakage_warning_is_only_given_for_a_leaky_model(forecast_service, bundle_factory):
+    """Telling a user a model reads the answer back when it does not is wrong too."""
+    leak_free = forecast_service(bundle_factory(feature_cols=LEAK_FREE_FEATURE_COLS))
+    response = leak_free.generate(make_request(horizon_days=7))
+    assert not any("quantity_sold equals sales" in warning for warning in response.warnings)
+    assert response.metadata.imputed_features == []
+
+
 def test_the_bundle_is_loaded_for_the_resolved_run(forecast_service):
     """Artifacts must come from the version the registry resolved."""
     service = forecast_service()

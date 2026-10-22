@@ -31,6 +31,8 @@ const MAX_RETRIES = 2;
 
 export interface UseScenarioCapabilitiesOptions {
   modelVersion?: string;
+  /** Model family; omitted means the deployment default. */
+  model?: string;
   enabled?: boolean;
   client?: ScenarioApiClient;
   queryOptions?: Partial<
@@ -66,14 +68,15 @@ export function useScenarioCapabilities(
 ): UseScenarioCapabilitiesResult {
   const {
     modelVersion = SCENARIO_LIMITS.defaultModelVersion,
+    model,
     enabled = true,
     client = scenarioApi,
     queryOptions,
   } = options;
 
   const query = useQuery<ScenarioCapabilitiesResponse, ScenarioApiError>({
-    queryKey: scenarioKeys.capabilities(modelVersion),
-    queryFn: ({ signal }) => client.getScenarioCapabilities(modelVersion, { signal }),
+    queryKey: scenarioKeys.capabilities(modelVersion, model),
+    queryFn: ({ signal }) => client.getScenarioCapabilities(modelVersion, { signal }, model),
     enabled: enabled && Boolean(modelVersion),
     staleTime: CAPABILITIES_STALE_TIME_MS,
     gcTime: CAPABILITIES_GC_TIME_MS,

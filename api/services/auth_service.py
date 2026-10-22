@@ -41,10 +41,11 @@ from api.core.errors import (
     InvalidCredentialsError,
     NotAuthenticatedError,
     RegistrationDisabledError,
+    RoleNotSelfAssignableError,
     TokenInvalidError,
     UserNotFoundError,
 )
-from api.core.rbac import Role
+from api.core.rbac import ROLE_ORDER, Role
 from api.core.security import (
     TokenClaims,
     TokenType,
@@ -162,6 +163,38 @@ def default_self_registration_role() -> Role:
     return configured
 
 
+#: Roles a new user may pick at sign-up when ``SELF_REGISTRATION_ROLES`` is
+#: unset. ADMIN is deliberately absent: a role that can create and promote users
+#: chosen from a public form would hand the whole platform to any visitor.
+DEFAULT_SELF_REGISTRATION_ROLES: Tuple[Role, ...] = (
+    Role.VIEWER,
+    Role.BUSINESS_USER,
+    Role.ANALYST,
+    Role.ML_ENGINEER,
+)
+
+
+def self_registration_roles() -> Tuple[Role, ...]:
+    """
+    Roles a user may choose for themselves at sign-up, least privileged first.
+
+    Configured with ``SELF_REGISTRATION_ROLES`` (comma-separated). ADMIN is
+    allowed only when listed there explicitly -- for a demo deployment, never a
+    shared one. The default role is always included, so a request that names
+    no role is never refused by this list.
+    """
+    raw = os.getenv("SELF_REGISTRATION_ROLES", "")
+    configured = [Role.from_value(token.strip()) for token in raw.split(",") if token.strip()]
+    roles = [role for role in configured if role is not None] or list(
+        DEFAULT_SELF_REGISTRATION_ROLES
+    )
+    default = default_self_registration_role()
+    if default not in roles:
+        roles.append(default)
+    order = {role: index for index, role in enumerate(reversed(ROLE_ORDER))}
+    return tuple(sorted(set(roles), key=lambda role: order.get(role, 0)))
+
+
 def max_login_attempts() -> int:
     """Failed attempts tolerated before a lockout."""
     return _env_int("MAX_LOGIN_ATTEMPTS", DEFAULT_MAX_LOGIN_ATTEMPTS, 3, 100)
@@ -192,12 +225,15 @@ class AuthService:
         full_name: str,
         password: str,
         actor: ActorContext,
+        role: Optional[Role] = None,
     ) -> AuthResult:
         """
         Create an account through the public endpoint and sign it in.
 
-        Refuses outright when self-registration is disabled, and the role is
-        never taken from the request body.
+        Refuses outright when self-registration is disabled. A requested role
+        is honoured only if it is in ``self_registration_roles()``; anything
+        else is refused (and audited) rather than silently downgraded, so the
+        user learns why they did not get what they asked for.
         """
         if not self_registration_enabled():
             self.audit.record(
@@ -209,6 +245,27 @@ class AuthService:
             )
             raise RegistrationDisabledError()
 
+        allowed = self_registration_roles()
+        chosen = role or default_self_registration_role()
+        if chosen not in allowed:
+            self.audit.record(
+                action=AuditAction.USER_REGISTERED,
+                resource_type=ResourceType.USER,
+                actor=actor,
+                outcome=OUTCOME_DENIED,
+                metadata={
+                    "reason": "role not self-assignable",
+                    "requested_role": chosen.value,
+                },
+            )
+            raise RoleNotSelfAssignableError(
+                field="role",
+                details={
+                    "requested_role": chosen.value,
+                    "allowed_roles": [item.value for item in allowed],
+                },
+            )
+
         canonical = normalise_email(email)
         validate_password_strength(password, email=canonical)
 
@@ -216,7 +273,7 @@ class AuthService:
             email=canonical,
             full_name=full_name,
             hashed_password=hash_password(password),
-            role=default_self_registration_role(),
+            role=chosen,
             is_active=True,
         )
 
@@ -653,4 +710,5 @@ __all__ = [
     "lockout_window",
     "max_login_attempts",
     "self_registration_enabled",
+    "self_registration_roles",
 ]

@@ -48,7 +48,15 @@ class ScenarioType(str, Enum):
     CLOSURE = "closure"
     HOLIDAY = "holiday"
     PRICE = "price"
+    SNAP = "snap"
     CUSTOM = "custom"
+
+
+class SnapMode(str, Enum):
+    """Whether a SNAP scenario adds benefit-payment days or removes them."""
+
+    ADD = "add"
+    REMOVE = "remove"
 
 
 class PromotionIntensity(str, Enum):
@@ -109,6 +117,13 @@ class ScenarioAssumptions(BaseModel):
         description="Multiplier applied to expected customer traffic.",
     )
     closure_dates: List[date] = Field(default_factory=list, max_length=MAX_CLOSURE_DATES)
+    snap_mode: SnapMode = Field(
+        default=SnapMode.ADD,
+        description=(
+            "SNAP scenarios only: 'add' treats the window as benefit-payment "
+            "days, 'remove' as days without them (benefits delayed)."
+        ),
+    )
     custom_overrides: Dict[str, Union[float, int, str]] = Field(default_factory=dict)
 
     @field_validator("closure_dates")
@@ -166,6 +181,9 @@ class ScenarioRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
     store_id: str = Field(min_length=1)
+    #: Model family (``ensemble``, ``xgboost``, ``lightgbm``). Omitted means the
+    #: deployment's default; checked against the configured models by the route.
+    model: Optional[str] = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,31}$")
     model_version: Optional[str] = DEFAULT_MODEL_VERSION
     horizon_days: int = Field(
         default=DEFAULT_HORIZON_DAYS,

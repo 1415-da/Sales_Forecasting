@@ -288,22 +288,23 @@ uncertainty band → persist the forecast so monitoring can score it later.
 
 ### The feature contract, and why the request looks sparse
 
-You are not asked for `is_holiday`, `customer_traffic`, `quantity_sold`, or
-`profit`. One module —
+You are asked only for dates and sales. One module —
 [`api/services/feature_service.py`](api/services/feature_service.py) — owns the
 contract for forecasting, scenarios, and monitoring alike, and it **reproduces
-the training policy** rather than inventing a serving-time one:
+the training policy** rather than inventing a serving-time one. The current
+models use only inputs that are known in advance for any future date:
 
-- `quantity_sold` and `profit` are same-day leaked columns, reconstructed from
-  the predicted value;
-- `customer_traffic` and `has_promotion` were effectively constant in training,
-  so serving supplies the same values — feeding "realistic" ones would push the
-  model out of distribution;
-- `is_holiday` is computed from `holidays.US()`.
+- lags and rolling windows of sales, ending the day *before* the forecast day
+  (training shifts its windows the same way);
+- calendar features, and `is_holiday` from `holidays.US()`;
+- `is_closed` — Christmas Day, when every M5 store is closed (and not also
+  counted as a holiday, matching training);
+- `snap_day` — the store's state SNAP benefit day, on the fixed schedule M5's
+  calendar uses (the test suite checks it against `calendar.csv`).
 
-Matching training is what removed the clipped calibration hack earlier versions
-needed: a history averaging 2 977 now yields xgboost 3 058 / lightgbm 3 085 /
-ensemble 3 067, with no post-hoc correction.
+Models trained before this change also used `quantity_sold`, `profit`,
+`customer_traffic`, and `has_promotion`; the builder still reconstructs those
+for such a version, and only then attaches the leakage warning.
 
 Every response carries `metadata` and `warnings[]`, so a caller is told what was
 assumed instead of guessing. The band is `z × residual_std × √step`, which is
@@ -442,59 +443,55 @@ above.
 The Streamlit **ML Operations Console** (`ui/`) is an API client. Its image
 installs no `mlflow`, `boto3`, `scikit-learn`, `xgboost`, or `lightgbm`, which
 is what makes direct artifact access impossible rather than merely
-discouraged.
+discouraged. Like the web app, it requires sign-in: platform health is shown
+to anyone, but the model list and the forecast test appear only after signing
+in from the sidebar with a web-app account.
 
 ---
 
 ## Measured performance
 
-Training metrics, as published by MLflow for the serving versions:
+Training metrics, as published by MLflow for the serving versions (v2, trained
+on the full 2011-01-29 → 2016-04-24 history; one-day-ahead on the held-out last
+20%):
 
 | Model | WAPE | MAE | RMSE | R² | Bias |
 |---|---|---|---|---|---|
-| ensemble | 1.05% | 29.64 | 98.08 | 0.993 | +6.75 |
-| xgboost | 1.12% | 31.57 | 82.96 | 0.995 | +3.67 |
+| ensemble | 6.37% | 250.2 | 359.5 | 0.918 | −49.3 |
+| xgboost | 6.51% | 255.8 | 369.0 | 0.913 | −53.2 |
+| lightgbm | 6.47% | 254.1 | 365.4 | 0.915 | −45.4 |
 
-**Those numbers overstate accuracy badly.** A real out-of-sample backtest
-measured:
+What matters for a user is the forecast the app actually produces: 28 days
+ahead, recursively, from a history. Replaying real M5 history through
+`POST /v1/forecast` from 10 monthly cutoffs (Jun 2015 → Mar 2016) for all 10
+stores, and scoring against what really happened:
 
-| Metric | Backtest | Training claim |
+| Model | 28-day WAPE | 95% band coverage |
 |---|---|---|
-| WAPE | **18.2%** | 1.1% |
-| MAE | **779** | 29.6 |
-| RMSE | **956** | 98.1 |
-| Bias | **+292** | +6.7 |
-| R² | **0.458** | 0.995 |
-| 95% interval coverage | **55%** | — |
+| **v2** (current) | **7.5%** | 99.5% |
+| v1 (previous) | 19.3% | 56% |
+| same-weekday-last-week baseline | 12.9% | — |
 
-The cause is target leakage in the feature set: `quantity_sold` *equals* `sales`
-and `profit` is exactly `0.3 × sales`. Those columns cannot be known for a
-future date, so serving reconstructs them from the last observed day — which is
-why a forecast reads as a level projection and why the training metrics are not
-reproducible out of sample.
+v1 reported a training WAPE of 1.05% but was worse than the naive baseline in
+practice: it was trained with `quantity_sold` (equal to `sales`), `profit`
+(`0.3 × sales`), and rolling windows that included the day being predicted, so
+it read the answer back. v2 drops all three and learns from lags, the
+calendar, SNAP days, and closures instead — which is also what makes the
+Scenario Planner's levers move.
 
-The platform reports this rather than hiding it: `/v1/monitoring/accuracy`
-carries the measured numbers, and monitoring raised the coverage alert on its
-own —
-
-> *Interval coverage is 55%. The 95% interval contained the actual 55% of the
-> time, so it is narrower than it claims.*
-
-Drift, measured live: PSI `forecast_error` **2.59** and `predicted_sales`
-**6.44** (both drifting); `actual_sales` **0.057** (stable).
-
-Trust the monitoring numbers, not the training card.
+Trust the monitoring numbers over the training card: `/v1/monitoring/accuracy`
+scores the forecasts that were actually served.
 
 ---
 
 ## Tests
 
 ```bash
-# Backend -- 710 tests: services, routers, error contract, auth, RBAC,
+# Backend -- 728 tests: services, routers, error contract, auth, RBAC,
 # monitoring, admin, scenario planner, dataset lineage
-pytest api/tests tests/api tests/test_dataset_lineage.py -q
+pytest api/tests tests/api tests/test_feature_pipeline.py tests/test_dataset_lineage.py -q
 
-# Frontend -- 278 tests + strict typecheck + production build (11 routes)
+# Frontend -- 291 tests + strict typecheck + production build (11 routes)
 cd frontend && npx tsc --noEmit && npm test && npm run build
 
 # Live suite against a running stack -- 10 tests; skips without the password
@@ -547,35 +544,30 @@ docs/               ARCHITECTURE · USER_WORKFLOW · API · DEPLOYMENT · FORECA
 
 Honest list, in rough order of how much they matter:
 
-1. **Target leakage is unfixed.** `quantity_sold == sales` and
-   `profit == 0.3 × sales` are in the training feature set. Fixing it needs a
-   feature allowlist change in `include/` and a retrain; the 18.2% backtest
-   WAPE is what to expect, and may improve once the model is forced to learn
-   from non-leaked signal.
-2. **The 95% interval is over-confident** — 55% measured coverage. The residual
-   estimate comes from the (leaked) training RMSE, so it is too small. A
-   conformal or backtest-derived residual would fix it.
-3. **Scenario levers are near-inert for this model**, because
-   `has_promotion`, `customer_traffic`, and `is_holiday` were effectively
-   constant in training. The platform discloses this; making the levers
-   meaningful requires training data in which they actually vary.
-4. **`closure` and `price` scenarios are unsupported** — no corresponding
-   feature exists. Correctly refused with `409` rather than approximated.
-5. **Monitoring shows the no-data state by default.** The M5 actuals end
+1. **Promotion, traffic, and price scenarios are unsupported.** M5 has no
+   promotion records and no traffic data, and its `sell_prices.csv` shows no
+   measurable effect at store-day level (correlation ≈ 0.001), so the model has
+   nothing to learn those levers from. They are reported as unsupported rather
+   than approximated. The levers that work are **Holiday**, **Store closure**
+   (learned from Christmas, when every store closes), and **SNAP benefit days**
+   (about +10% in the data; set through a Custom override on `snap_day`).
+2. **The 95% interval is now conservative** — 99.5% measured coverage. It is
+   built from the honest holdout RMSE widened by √step, which over-widens
+   later days. A conformal or backtest-derived band would tighten it.
+3. **Monitoring shows the no-data state by default.** The M5 actuals end
    **2016-04-24**, so a rolling 28-day window around today has no scorable
    pairs; real numbers come from an explicit backtest window.
-6. **Drift is prediction drift, not feature drift.** Feature drift would need
+4. **Drift is prediction drift, not feature drift.** Feature drift would need
    the per-request feature matrix persisted.
-7. **`max_sales_files: 365` truncates training data** in the ingestion config.
-8. **No CI.** Python lint, frontend lint, and Docker build checks are not wired
+5. **No CI.** Python lint, frontend lint, and Docker build checks are not wired
    into a pipeline yet; all three run clean locally.
-9. **No SSO/OIDC, MFA, per-user API keys, or global rate limiting** beyond
+6. **No SSO/OIDC, MFA, per-user API keys, or global rate limiting** beyond
    login lockout.
-10. **The Airflow image carries a stale baked-in copy of `api/`** — harmless
+7. **The Airflow image carries a stale baked-in copy of `api/`** — harmless
     now that no DAG imports it, but it should be dropped from the image.
-11. **The frontend runs `next dev`** in compose. For production, build the app
+8. **The frontend runs `next dev`** in compose. For production, build the app
     and serve `next start`.
-12. **MLflow, MinIO, and Airflow have no authentication** in this compose
+9. **MLflow, MinIO, and Airflow have no authentication** in this compose
     setup. Do not publish 5001, 9000, 9001, or 8080 beyond localhost.
 
 ---

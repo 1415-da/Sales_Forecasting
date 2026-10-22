@@ -35,6 +35,7 @@ export const scenarioTypeSchema = z.enum([
   'closure',
   'holiday',
   'price',
+  'snap',
   'custom',
 ]);
 export type ScenarioType = z.infer<typeof scenarioTypeSchema>;
@@ -144,6 +145,8 @@ export const scenarioAssumptionsSchema = z.object({
   discount_depth: z.number().min(0).max(1).nullish(),
   traffic_multiplier: z.number().min(0.5).max(2).nullish(),
   closure_dates: z.array(isoDateSchema).default([]),
+  /** SNAP scenarios: add benefit-payment days, or remove them. */
+  snap_mode: z.enum(['add', 'remove']).default('add'),
   custom_overrides: z.record(z.union([z.number(), z.string()])).default({}),
 });
 export type ScenarioAssumptions = z.infer<typeof scenarioAssumptionsSchema>;
@@ -160,6 +163,8 @@ export const SCENARIO_LIMITS = {
 
 export const scenarioRequestSchema = z.object({
   store_id: z.string().min(1),
+  /** Model family (ensemble, xgboost, lightgbm); omitted means the default. */
+  model: z.string().nullish(),
   model_version: z.string().nullish().default(SCENARIO_LIMITS.defaultModelVersion),
   horizon_days: z
     .number()
@@ -208,6 +213,7 @@ export const scenarioCapabilityStatusSchema = z.object({
 export type ScenarioCapabilityStatus = z.infer<typeof scenarioCapabilityStatusSchema>;
 
 export const scenarioCapabilitiesResponseSchema = z.object({
+  model: z.string().nullish(),
   model_version: z.string(),
   feature_schema_version: z.string().default('v1'),
   run_id: z.string().nullable().default(null),
@@ -375,6 +381,7 @@ export const scenarioComparisonResponseSchema = z.object({
   scenario_id: z.string(),
   baseline_forecast_id: z.string(),
   scenario_forecast_id: z.string(),
+  model: z.string().nullish(),
   model_version: z.string(),
   model_stage: z.string(),
   scenario_type: scenarioTypeSchema,

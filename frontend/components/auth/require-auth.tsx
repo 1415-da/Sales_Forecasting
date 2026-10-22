@@ -20,7 +20,7 @@ import { useRouter } from 'next/navigation';
 import { useEffect, type ReactNode } from 'react';
 
 import { EmptyState } from '@/components/shared/empty-state';
-import { LOGIN_PATH, useAuth } from '@/hooks/use-auth';
+import { SIGN_UP_PATH, useAuth } from '@/hooks/use-auth';
 import {
   NO_PERMISSION_MESSAGE,
   ROLE_LABELS,
@@ -63,7 +63,9 @@ export function RequireAuth({ children, permission }: RequireAuthProps) {
         typeof window !== 'undefined'
           ? `?next=${encodeURIComponent(window.location.pathname)}`
           : '';
-      router.replace(`${LOGIN_PATH}${next}`);
+      // To sign-up, not sign-in: a first-time visitor has no account yet. The
+      // sign-up page links to sign-in and carries `next` across.
+      router.replace(`${SIGN_UP_PATH}${next}`);
     }
   }, [isAuthenticated, isChecking, router]);
 

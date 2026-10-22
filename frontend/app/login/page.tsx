@@ -99,10 +99,17 @@ function LoginForm() {
       // else, so route there instead of to the console.
       router.replace(user.must_change_password ? '/settings?change-password=1' : next);
     } catch (caught) {
-      setError(
+      const message =
         caught instanceof ApiError
           ? friendlyMessage(caught)
-          : 'Could not sign in. Try again.',
+          : 'Could not sign in. Try again.';
+      // The usual cause for a first-time visitor is that no account exists yet.
+      setError(
+        registrationOpen &&
+          caught instanceof ApiError &&
+          caught.code === 'INVALID_CREDENTIALS'
+          ? `${message} New here? Create an account first.`
+          : message,
       );
       // Never leave the password in the field after a failure: the next
       // attempt should be deliberate.
@@ -174,7 +181,14 @@ function LoginForm() {
             {registrationOpen ? (
               <p className="text-center text-sm text-muted-foreground">
                 No account?{' '}
-                <Link href="/register" className="font-medium underline">
+                <Link
+                  href={
+                    params.get('next')
+                      ? `/register?next=${encodeURIComponent(params.get('next')!)}`
+                      : '/register'
+                  }
+                  className="font-medium underline"
+                >
                   Create one
                 </Link>
               </p>

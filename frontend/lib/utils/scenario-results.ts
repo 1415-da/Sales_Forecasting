@@ -367,6 +367,22 @@ export const FORBIDDEN_CAUSAL_TERMS = [
   'proves',
 ];
 
+/** Display name of a scenario type; acronyms stay acronyms. */
+export function scenarioTypeLabel(type: string): string {
+  if (type === 'snap') return 'SNAP benefit days';
+  return humanizeIdentifier(type);
+}
+
+/** Display name of a model family, e.g. `xgboost` -> `XGBoost`. */
+export function modelFamilyLabel(model: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    ensemble: 'Ensemble',
+    xgboost: 'XGBoost',
+    lightgbm: 'LightGBM',
+  };
+  return model ? labels[model] ?? humanizeIdentifier(model) : 'Ensemble';
+}
+
 /** Describe the scenario's shape, e.g. `7-day medium promotion`. */
 export function describeScenario(comparison: ScenarioComparisonResponse): string {
   const assumptions = comparison.assumptions;
@@ -385,6 +401,9 @@ export function describeScenario(comparison: ScenarioComparisonResponse): string
   }
   if (comparison.scenario_type === 'closure') {
     return `${duration}store closure`;
+  }
+  if (comparison.scenario_type === 'snap') {
+    return `${duration}SNAP benefit ${assumptions?.snap_mode === 'remove' ? 'removal' : 'addition'}`;
   }
   return `${duration}${intensity}${type}`.trim();
 }

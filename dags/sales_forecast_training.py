@@ -135,87 +135,63 @@ def sales_forecast_training():
             f"Loading sales data from {len(sales_file_list)} of "
             f"{len(file_paths['sales'])} daily parquet files..."
         )
-        sales_dfs = []
+        # Reduced to store-day as each file is read: the full M5 history is
+        # ~58M product-day rows, which would not fit in memory concatenated,
+        # while the model only ever sees store-day totals.
+        store_days = []
         for i, sales_file in enumerate(sales_file_list):
-            df = pd.read_parquet(sales_file)
-            sales_dfs.append(df)
-            if (i + 1) % 10 == 0:
-                print(f"  Loaded {i + 1} files...")
-        sales_df = pd.concat(sales_dfs, ignore_index=True)
-        print(f"Combined sales data shape: {sales_df.shape}")
-        daily_sales = (
-            sales_df.groupby(["date", "store_id", "product_id", "category"])
-            .agg(
-                {
-                    "quantity_sold": "sum",
-                    "revenue": "sum",
-                    "cost": "sum",
-                    "profit": "sum",
-                    "discount_percent": "mean",
-                    "unit_price": "mean",
-                }
+            df = pd.read_parquet(sales_file, columns=["date", "store_id", "revenue"])
+            store_days.append(
+                df.groupby(["date", "store_id"], as_index=False)["revenue"].sum()
             )
-            .reset_index()
+            if (i + 1) % 100 == 0:
+                print(f"  Loaded {i + 1} files...")
+        daily_sales = pd.concat(store_days, ignore_index=True).rename(
+            columns={"revenue": "sales"}
         )
-        daily_sales = daily_sales.rename(columns={"revenue": "sales"})
         daily_sales["date"] = pd.to_datetime(daily_sales["date"])
+        print(f"Store-day sales shape: {daily_sales.shape}")
 
+        # Exogenous inputs only. `quantity_sold` and `profit` are deliberately
+        # absent: both are the same-day target under another name (M5 has
+        # unit_price 1.0 and profit = 0.3 * revenue), so a model fed them reads
+        # the answer back and learns nothing a scenario could move.
         if file_paths.get("promotions") and len(file_paths["promotions"]) > 0 and os.path.exists(file_paths["promotions"][0]):
             promo_df = pd.read_parquet(file_paths["promotions"][0])
             promo_df["date"] = pd.to_datetime(promo_df["date"])
-            if "product_id" in promo_df.columns:
-                target_metric = "discount_percent" if "discount_percent" in promo_df.columns else promo_df.columns[-1]
-                promo_summary = (
-                    promo_df.groupby(["date", "product_id"])[target_metric]
-                    .max()
-                    .reset_index()
-                )
+            # Only genuine promotion records become `has_promotion`. M5's
+            # promotions file is the calendar's "any event" flag; labelling it a
+            # promotion made the Promotion scenario move a feature that meant
+            # something else, so it is not used as one.
+            if "has_promotion" in promo_df.columns:
+                promo_summary = promo_df.groupby("date", as_index=False)["has_promotion"].max()
+                daily_sales = daily_sales.merge(promo_summary, on="date", how="left")
+            elif "product_id" in promo_df.columns:
+                promo_summary = promo_df[["date"]].drop_duplicates()
                 promo_summary["has_promotion"] = 1
-                daily_sales = daily_sales.merge(
-                    promo_summary[["date", "product_id", "has_promotion"]],
-                    on=["date", "product_id"],
-                    how="left",
-                )
-            else:
-                # Promotion or event data at date level (e.g. M5 calendar events)
-                if "has_event" in promo_df.columns:
-                    event_summary = (
-                        promo_df.groupby("date")["has_event"]
-                        .max()
-                        .reset_index()
-                        .rename(columns={"has_event": "has_promotion"})
-                    )
-                elif "has_promotion" in promo_df.columns:
-                    event_summary = (
-                        promo_df.groupby("date")["has_promotion"]
-                        .max()
-                        .reset_index()
-                    )
-                else:
-                    event_summary = promo_df[["date"]].drop_duplicates()
-                    event_summary["has_promotion"] = 1
-                daily_sales = daily_sales.merge(
-                    event_summary[["date", "has_promotion"]],
-                    on="date",
-                    how="left",
-                )
-                if "has_event" in promo_df.columns and "is_holiday" not in daily_sales.columns:
-                    holiday_summary = (
-                        promo_df.groupby("date")["has_event"]
-                        .max()
-                        .reset_index()
-                        .rename(columns={"has_event": "is_holiday"})
-                    )
-                    daily_sales = daily_sales.merge(
-                        holiday_summary[["date", "is_holiday"]],
-                        on="date",
-                        how="left",
-                    )
-
-        if "has_promotion" not in daily_sales.columns:
-            daily_sales["has_promotion"] = 0
-        else:
+                daily_sales = daily_sales.merge(promo_summary, on="date", how="left")
+        if "has_promotion" in daily_sales.columns:
             daily_sales["has_promotion"] = daily_sales["has_promotion"].fillna(0)
+
+        # Calendar drivers with a measured effect on M5 store sales: SNAP
+        # benefit days (about +10% versus other days) and Christmas, the one day
+        # every store is closed. Both are known in advance for any future date,
+        # which is what makes them usable as forecast inputs and scenario levers.
+        daily_sales["is_closed"] = (
+            (daily_sales["date"].dt.month == 12) & (daily_sales["date"].dt.day == 25)
+        ).astype(int)
+        raw_path = (extract_result.get("lineage") or {}).get("raw_path") or data_cfg.get("raw_path")
+        calendar_path = os.path.join(raw_path, "calendar.csv") if raw_path else None
+        if calendar_path and os.path.exists(calendar_path):
+            snap = pd.read_csv(
+                calendar_path, usecols=["date", "snap_CA", "snap_TX", "snap_WI"], parse_dates=["date"]
+            ).melt(id_vars="date", var_name="state", value_name="snap_day")
+            snap["state"] = snap["state"].str.replace("snap_", "", regex=False)
+            daily_sales["state"] = daily_sales["store_id"].astype(str).str[:2]
+            daily_sales = daily_sales.merge(snap, on=["date", "state"], how="left").drop(
+                columns=["state"]
+            )
+            daily_sales["snap_day"] = daily_sales["snap_day"].fillna(0).astype(int)
 
         if file_paths.get("customer_traffic"):
             traffic_dfs = []
@@ -239,36 +215,28 @@ def sales_forecast_training():
                     daily_sales = daily_sales.merge(
                         traffic_summary, on=["date", "store_id"], how="left"
                     )
+                    daily_sales["customer_traffic"] = daily_sales["customer_traffic"].fillna(0)
 
-        if "customer_traffic" not in daily_sales.columns:
-            daily_sales["customer_traffic"] = 0
-        else:
-            daily_sales["customer_traffic"] = daily_sales["customer_traffic"].fillna(0)
+        # An input that never varied carries no signal, and keeping it would
+        # advertise a scenario lever the model cannot respond to (M5 has no
+        # traffic data, so this was 0 on every training day).
+        constant = [
+            column
+            for column in ("has_promotion", "customer_traffic")
+            if column in daily_sales.columns and daily_sales[column].nunique() <= 1
+        ]
+        if constant:
+            print(f"Dropping exogenous inputs that never vary: {constant}")
+            daily_sales = daily_sales.drop(columns=constant)
 
-        if "is_holiday" not in daily_sales.columns:
-            daily_sales["is_holiday"] = 0
-        else:
-            daily_sales["is_holiday"] = daily_sales["is_holiday"].fillna(0)
+        # `is_holiday` is produced by the feature pipeline from the US holiday
+        # calendar, so it is not built here.
         print(f"Final training data shape: {daily_sales.shape}")
         print(f"Columns: {daily_sales.columns.tolist()}")
         from include.ml_models.train_models import ModelTrainer
 
         trainer = ModelTrainer()
-        store_daily_sales = (
-            daily_sales.groupby(["date", "store_id"])
-            .agg(
-                {
-                    "sales": "sum",
-                    "quantity_sold": "sum",
-                    "profit": "sum",
-                    "has_promotion": "mean",
-                    "customer_traffic": "first",
-                    "is_holiday": "first",
-                }
-            )
-            .reset_index()
-        )
-        store_daily_sales["date"] = pd.to_datetime(store_daily_sales["date"])
+        store_daily_sales = daily_sales.sort_values(["date", "store_id"]).reset_index(drop=True)
         train_df, val_df, test_df = trainer.prepare_data(
             store_daily_sales,
             target_col="sales",

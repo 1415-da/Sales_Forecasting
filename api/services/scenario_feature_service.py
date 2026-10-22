@@ -26,7 +26,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
-from api.schemas.scenario import PromotionIntensity, ScenarioAssumptions, ScenarioType
+from api.schemas.scenario import (
+    PromotionIntensity,
+    ScenarioAssumptions,
+    ScenarioType,
+    SnapMode,
+)
 from api.schemas.scenario_capabilities import FeatureSchema
 from api.schemas.scenario_override import (
     AppliedOverride,
@@ -67,6 +72,7 @@ PROMOTION_FEATURES = (
 TRAFFIC_FEATURE = "customer_traffic"
 CLOSURE_FEATURE = "is_closed"
 HOLIDAY_FEATURE = "is_holiday"
+SNAP_FEATURE = "snap_day"
 HOLIDAY_PROXIMITY_FEATURE = "holiday_proximity"
 
 # Numeric encoding used when `promotion_intensity` was trained as a number.
@@ -202,6 +208,7 @@ class ScenarioFeatureService:
             ScenarioType.TRAFFIC: self._apply_traffic,
             ScenarioType.CLOSURE: self._apply_closure,
             ScenarioType.HOLIDAY: self._apply_holiday,
+            ScenarioType.SNAP: self._apply_snap,
             ScenarioType.CUSTOM: self._apply_custom,
         }.get(scenario.scenario_type)
 
@@ -489,6 +496,21 @@ class ScenarioFeatureService:
             unsupported,
             required=[HOLIDAY_FEATURE, HOLIDAY_PROXIMITY_FEATURE],
         )
+
+    def _apply_snap(
+        self,
+        context: "_OverrideContext",
+        scenario: ScenarioAssumptions,
+        applied: List[AppliedOverride],
+        unsupported: List[UnsupportedOverride],
+    ) -> None:
+        """Mark the window as SNAP benefit days, or as days without them."""
+        self._require_dates(scenario, context)
+        value = 1 if scenario.snap_mode is SnapMode.ADD else 0
+        self._set_value(
+            context, SNAP_FEATURE, value, OverrideType.SET_CONSTANT, applied, unsupported
+        )
+        self._require_any_applied(applied, scenario, unsupported, required=[SNAP_FEATURE])
 
     def _apply_custom(
         self,

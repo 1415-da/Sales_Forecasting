@@ -26,6 +26,31 @@ import {
 /* -------------------------------------------------------------------------- */
 
 export const HORIZON_OPTIONS = [7, 14, 30, 60, 90] as const;
+
+/** The model family the planner opens with: the most accurate of the three. */
+export const DEFAULT_SCENARIO_MODEL = 'ensemble';
+
+export type SnapMode = 'add' | 'remove';
+
+/**
+ * SNAP benefit-payment days of the month, per state. M5 issues them on the
+ * same days every month; this mirrors `SNAP_DAYS_BY_STATE` in the API's feature
+ * builder, which its test suite checks against the M5 calendar.
+ */
+export const SNAP_DAYS_BY_STATE: Record<string, readonly number[]> = {
+  CA: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  TX: [1, 3, 5, 6, 7, 9, 11, 12, 13, 15],
+  WI: [2, 3, 5, 6, 8, 9, 11, 12, 14, 15],
+};
+
+/** The store's SNAP days on `fromIso` .. `fromIso + days - 1`. */
+export function snapDaysInWindow(storeId: string, fromIso: string, days: number): string[] {
+  const schedule = SNAP_DAYS_BY_STATE[storeId.slice(0, 2).toUpperCase()];
+  if (!schedule || !fromIso || days < 1) return [];
+  return Array.from({ length: days }, (_, offset) => addDays(fromIso, offset)).filter((iso) =>
+    schedule.includes(Number(iso.slice(8, 10))),
+  );
+}
 export type HorizonDays = (typeof HORIZON_OPTIONS)[number];
 
 export const CONFIDENCE_OPTIONS = [80, 95] as const;
@@ -54,23 +79,104 @@ export const TRAFFIC_LIFT_MAX = 100;
 
 export const MAX_PROMOTION_DURATION_DAYS = 90;
 
-/** Holidays offered in the picker. Labels are display-only. */
+/** A US public holiday. Labels are display-only. */
 export interface HolidayOption {
   id: string;
   label: string;
-  date: string;
 }
 
+/**
+ * US federal holidays: the calendar the model's `is_holiday` input comes from,
+ * so every one of them is already part of the baseline forecast. A Holiday
+ * scenario therefore models *additional* holiday days (a local holiday, a store
+ * event), and this list exists to tell the user which days need no scenario.
+ *
+ * Christmas Day is absent: every store in the training data is closed that
+ * day, so the model treats it as a closure (`is_closed`), not a holiday.
+ */
 export const HOLIDAY_OPTIONS: HolidayOption[] = [
-  { id: 'new_years_day', label: "New Year's Day", date: '2026-01-01' },
-  { id: 'presidents_day', label: "Presidents' Day", date: '2026-02-16' },
-  { id: 'memorial_day', label: 'Memorial Day', date: '2026-05-25' },
-  { id: 'independence_day', label: 'Independence Day', date: '2026-07-04' },
-  { id: 'labor_day', label: 'Labor Day', date: '2026-09-07' },
-  { id: 'thanksgiving', label: 'Thanksgiving', date: '2026-11-26' },
-  { id: 'black_friday', label: 'Black Friday', date: '2026-11-27' },
-  { id: 'christmas_day', label: 'Christmas Day', date: '2026-12-25' },
+  { id: 'new_years_day', label: "New Year's Day" },
+  { id: 'mlk_day', label: 'Martin Luther King Jr. Day' },
+  { id: 'presidents_day', label: "Presidents' Day" },
+  { id: 'memorial_day', label: 'Memorial Day' },
+  { id: 'juneteenth', label: 'Juneteenth' },
+  { id: 'independence_day', label: 'Independence Day' },
+  { id: 'labor_day', label: 'Labor Day' },
+  { id: 'columbus_day', label: 'Columbus Day' },
+  { id: 'veterans_day', label: "Veterans Day" },
+  { id: 'thanksgiving', label: 'Thanksgiving' },
 ];
+
+/** The `nth` (1-based) given weekday of a month, or the last one when nth is -1. */
+function nthWeekday(year: number, month: number, weekday: number, nth: number): Date {
+  if (nth === -1) {
+    const last = new Date(Date.UTC(year, month + 1, 0));
+    return new Date(Date.UTC(year, month, last.getUTCDate() - ((last.getUTCDay() - weekday + 7) % 7)));
+  }
+  const first = new Date(Date.UTC(year, month, 1));
+  const offset = (weekday - first.getUTCDay() + 7) % 7;
+  return new Date(Date.UTC(year, month, 1 + offset + 7 * (nth - 1)));
+}
+
+/** A holiday's date in one year, by the US federal rule. */
+function holidayInYear(id: string, year: number): Date | null {
+  switch (id) {
+    case 'new_years_day':
+      return new Date(Date.UTC(year, 0, 1));
+    case 'mlk_day':
+      return nthWeekday(year, 0, 1, 3);
+    case 'presidents_day':
+      return nthWeekday(year, 1, 1, 3);
+    case 'memorial_day':
+      return nthWeekday(year, 4, 1, -1);
+    case 'juneteenth':
+      return new Date(Date.UTC(year, 5, 19));
+    case 'independence_day':
+      return new Date(Date.UTC(year, 6, 4));
+    case 'labor_day':
+      return nthWeekday(year, 8, 1, 1);
+    case 'columbus_day':
+      return nthWeekday(year, 9, 1, 2);
+    case 'veterans_day':
+      return new Date(Date.UTC(year, 10, 11));
+    case 'thanksgiving':
+      return nthWeekday(year, 10, 4, 4);
+    default:
+      return null;
+  }
+}
+
+/**
+ * The next occurrence of a holiday on or after `fromIso`.
+ *
+ * Computed rather than listed so the dates shown never go stale.
+ */
+export function nextHolidayDate(id: string, fromIso: string): string | null {
+  const from = fromIso || new Date().toISOString().slice(0, 10);
+  const year = Number(from.slice(0, 4));
+  for (const candidateYear of [year, year + 1]) {
+    const date = holidayInYear(id, candidateYear);
+    if (!date) return null;
+    const iso = date.toISOString().slice(0, 10);
+    if (iso >= from) return iso;
+  }
+  return null;
+}
+
+/** The public holidays falling on `fromIso` .. `fromIso + days - 1`, in date order. */
+export function holidaysInWindow(
+  fromIso: string,
+  days: number,
+): { label: string; date: string }[] {
+  if (!fromIso || days < 1) return [];
+  const last = addDays(fromIso, days - 1);
+  return HOLIDAY_OPTIONS.map((option) => ({
+    label: option.label,
+    date: nextHolidayDate(option.id, fromIso) ?? '',
+  }))
+    .filter((holiday) => holiday.date && holiday.date <= last)
+    .sort((a, b) => a.date.localeCompare(b.date));
+}
 
 /* -------------------------------------------------------------------------- */
 /* State                                                                       */
@@ -93,7 +199,8 @@ export interface AssumptionsDraft {
   trafficLiftPct: number;
   /** Traffic change for a traffic scenario, in percent (may be negative). */
   trafficChangePct: number;
-  holidayId: string;
+  /** SNAP scenarios: add benefit-payment days, or remove them. */
+  snapMode: SnapMode;
   customFeature: string;
   customValue: number;
 }
@@ -104,6 +211,8 @@ export type ResultStatus = 'none' | 'fresh' | 'stale';
 export interface ScenarioFormState {
   storeId: string;
   horizonDays: HorizonDays;
+  /** Model family; each has its own version list. */
+  model: string;
   modelVersion: string;
   confidenceLevel: ConfidenceLevel;
   scenarioType: ScenarioType;
@@ -122,7 +231,7 @@ export const DEFAULT_ASSUMPTIONS: AssumptionsDraft = {
   discountPct: 20,
   trafficLiftPct: 10,
   trafficChangePct: 10,
-  holidayId: '',
+  snapMode: 'add',
   customFeature: '',
   customValue: 0,
 };
@@ -130,6 +239,7 @@ export const DEFAULT_ASSUMPTIONS: AssumptionsDraft = {
 export interface ScenarioFormInit {
   storeId?: string;
   horizonDays?: HorizonDays;
+  model?: string;
   modelVersion?: string;
   confidenceLevel?: ConfidenceLevel;
   scenarioType?: ScenarioType;
@@ -140,6 +250,7 @@ export function initialFormState(init: ScenarioFormInit = {}): ScenarioFormState
   return {
     storeId: init.storeId ?? '',
     horizonDays: init.horizonDays ?? 30,
+    model: init.model ?? DEFAULT_SCENARIO_MODEL,
     modelVersion: init.modelVersion ?? SCENARIO_LIMITS.defaultModelVersion,
     confidenceLevel: init.confidenceLevel ?? 80,
     scenarioType: init.scenarioType ?? 'promotion',
@@ -157,6 +268,7 @@ export function initialFormState(init: ScenarioFormInit = {}): ScenarioFormState
 export type ScenarioFormAction =
   | { type: 'setStoreId'; value: string }
   | { type: 'setHorizonDays'; value: HorizonDays }
+  | { type: 'setModel'; value: string }
   | { type: 'setModelVersion'; value: string }
   | { type: 'setConfidenceLevel'; value: ConfidenceLevel }
   | { type: 'setScenarioType'; value: ScenarioType }
@@ -172,7 +284,7 @@ export type ScenarioFormAction =
  * A different store, model, or horizon describes a different question, so the
  * previous answer is not merely stale -- it is about something else.
  */
-const RESULT_CLEARING_FIELDS = ['storeId', 'modelVersion', 'horizonDays'] as const;
+const RESULT_CLEARING_FIELDS = ['storeId', 'model', 'modelVersion', 'horizonDays'] as const;
 
 /** Mark the result stale, but only when one exists. */
 function staleAfterEdit(state: ScenarioFormState): ResultStatus {
@@ -187,6 +299,18 @@ export function scenarioFormReducer(
     case 'setStoreId':
       if (action.value === state.storeId) return state;
       return { ...state, storeId: action.value, resultStatus: 'none', idempotency: null };
+
+    case 'setModel':
+      if (action.value === state.model) return state;
+      // Version numbers belong to one model family, so a new family starts
+      // from its own latest Production version.
+      return {
+        ...state,
+        model: action.value,
+        modelVersion: SCENARIO_LIMITS.defaultModelVersion,
+        resultStatus: 'none',
+        idempotency: null,
+      };
 
     case 'setModelVersion':
       if (action.value === state.modelVersion) return state;
@@ -228,9 +352,21 @@ export function scenarioFormReducer(
     case 'setAssumption': {
       const current = state.assumptions[action.field];
       if (current === action.value) return state;
+      const assumptions = { ...state.assumptions, [action.field]: action.value };
+      // The start date is shared by every scenario type. Moving it past a
+      // closure's end date would otherwise leave the closure invalid the next
+      // time that type is picked, so the end date follows it.
+      if (
+        action.field === 'startDate' &&
+        typeof action.value === 'string' &&
+        assumptions.endDate &&
+        assumptions.endDate < action.value
+      ) {
+        assumptions.endDate = action.value;
+      }
       return {
         ...state,
-        assumptions: { ...state.assumptions, [action.field]: action.value },
+        assumptions,
         touched: { ...state.touched, [action.field]: true },
         resultStatus: staleAfterEdit(state),
       };
@@ -266,8 +402,11 @@ export const FIELDS_BY_SCENARIO_TYPE: Record<ScenarioType, (keyof AssumptionsDra
   promotion: ['startDate', 'durationDays', 'intensity', 'discountPct', 'trafficLiftPct'],
   traffic: ['startDate', 'durationDays', 'trafficChangePct'],
   closure: ['startDate', 'endDate'],
-  holiday: ['holidayId', 'intensity'],
+  // A date window, like the other levers: the model's holiday response is one
+  // learned effect, so there is no intensity to choose.
+  holiday: ['startDate', 'durationDays'],
   price: ['startDate', 'durationDays', 'discountPct'],
+  snap: ['startDate', 'durationDays', 'snapMode'],
   custom: ['startDate', 'durationDays', 'customFeature', 'customValue'],
 };
 
@@ -310,6 +449,7 @@ export function buildAssumptions(state: ScenarioFormState): ScenarioAssumptions 
     discount_depth: null,
     traffic_multiplier: null,
     closure_dates: [],
+    snap_mode: 'add',
     custom_overrides: {},
   };
 
@@ -350,12 +490,12 @@ export function buildAssumptions(state: ScenarioFormState): ScenarioAssumptions 
       };
 
     case 'holiday': {
-      const holiday = HOLIDAY_OPTIONS.find((option) => option.id === draft.holidayId);
       return {
         ...base,
-        start_date: holiday?.date ?? null,
-        end_date: holiday?.date ?? null,
-        promotion_intensity: draft.intensity,
+        start_date: draft.startDate || null,
+        end_date: draft.startDate
+          ? addDays(draft.startDate, Math.max(1, draft.durationDays) - 1)
+          : null,
       };
     }
 
@@ -367,6 +507,16 @@ export function buildAssumptions(state: ScenarioFormState): ScenarioAssumptions 
           ? addDays(draft.startDate, Math.max(1, draft.durationDays) - 1)
           : null,
         discount_depth: draft.discountPct / 100,
+      };
+
+    case 'snap':
+      return {
+        ...base,
+        start_date: draft.startDate || null,
+        end_date: draft.startDate
+          ? addDays(draft.startDate, Math.max(1, draft.durationDays) - 1)
+          : null,
+        snap_mode: draft.snapMode,
       };
 
     case 'custom':
@@ -393,6 +543,7 @@ export function buildScenarioRequest(
 ): ScenarioRequestInput {
   return {
     store_id: state.storeId,
+    model: state.model,
     model_version: state.modelVersion,
     horizon_days: state.horizonDays,
     confidence_levels: CONFIDENCE_QUANTILES[state.confidenceLevel],
@@ -502,10 +653,6 @@ export function validateForm(
     }
   }
 
-  if (scenarioType === 'holiday' && !draft.holidayId) {
-    errors.holidayId = 'Choose a holiday.';
-  }
-
   if (scenarioType === 'custom') {
     if (!draft.customFeature) {
       errors.customFeature = 'Choose a feature to override.';
@@ -555,6 +702,7 @@ export interface UseScenarioFormResult {
 
   setStoreId: (value: string) => void;
   setHorizonDays: (value: HorizonDays) => void;
+  setModel: (value: string) => void;
   setModelVersion: (value: string) => void;
   setConfidenceLevel: (value: ConfidenceLevel) => void;
   setScenarioType: (value: ScenarioType) => void;
@@ -630,6 +778,7 @@ export function useScenarioForm(
       (value: HorizonDays) => dispatch({ type: 'setHorizonDays', value }),
       [],
     ),
+    setModel: useCallback((value: string) => dispatch({ type: 'setModel', value }), []),
     setModelVersion: useCallback(
       (value: string) => dispatch({ type: 'setModelVersion', value }),
       [],

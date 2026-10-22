@@ -39,6 +39,7 @@ ALL_FEATURES = [
     "is_holiday",
     "is_closed",
     "price",
+    "snap_day",
 ]
 
 

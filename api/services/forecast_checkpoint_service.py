@@ -111,6 +111,9 @@ class ScenarioBaselineForecast(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     forecast_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
     store_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    # Nullable: rows from before model choice existed carry none, and were all
+    # produced by the default model.
+    model: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     model_version: Mapped[str] = mapped_column(String(64), nullable=False)
     model_stage: Mapped[str] = mapped_column(String(32), nullable=False)
     horizon_days: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -261,6 +264,7 @@ class ForecastCheckpointService:
         feature_schema_version: str,
         forecast_id: Optional[str] = None,
         expires_at: Optional[datetime] = None,
+        model: Optional[str] = None,
     ) -> BaselineForecastCheckpoint:
         """Insert a checkpoint with status ``created``, before any inference runs."""
         now = datetime.now(timezone.utc)
@@ -271,6 +275,7 @@ class ForecastCheckpointService:
             id=uuid.uuid4(),
             forecast_id=forecast_id or new_forecast_id(),
             store_id=store_id,
+            model=model,
             model_version=model_version,
             model_stage=model_stage,
             horizon_days=horizon_days,
