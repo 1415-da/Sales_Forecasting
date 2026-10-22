@@ -61,6 +61,14 @@ deployment is <https://sales-forecasting-mu.vercel.app> (Vercel project
   `API_PROXY_TARGET` in Vercel, and redeploys production (about a minute;
   requires `vercel login`).
 - Restarting only the `api` container keeps the hostname.
+- A quick tunnel also dies after a long network outage, such as the Mac
+  sleeping. The site still loads, but sign-in and all data calls fail with
+  502/530 and `/health` on the site shows `DNS_HOSTNAME_NOT_FOUND`.
+  `scripts/tunnel-watchdog.sh` detects this, recreates the tunnel, and
+  republishes. Run `scripts/install-tunnel-watchdog.sh` once to run it every 5
+  minutes as a launchd agent (log:
+  `~/Library/Logs/sales-forecasting-tunnel-watchdog.log`; remove it with
+  `--uninstall`). Recovery takes about two minutes.
 - Airflow, MLflow, MinIO, and Streamlit are not tunnelled; they have no
   authentication in this setup and stay on localhost.
 

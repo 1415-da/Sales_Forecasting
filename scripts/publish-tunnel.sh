@@ -24,9 +24,13 @@ if [ -z "$URL" ]; then
 fi
 
 echo "Tunnel: $URL"
-curl -fsS -m 20 "$URL/health" >/dev/null || echo "warning: $URL/health is not answering yet" >&2
+# Resolved over DNS-over-HTTPS so a lookup made before the hostname exists is
+# not cached by macOS as "not found" (see tunnel-watchdog.sh).
+curl -fsS -m 20 --doh-url https://1.1.1.1/dns-query "$URL/health" >/dev/null || echo "warning: $URL/health is not answering yet" >&2
 
-cd "$ROOT/frontend"
+# The Vercel CLI finds the project from frontend/.vercel, or from
+# VERCEL_ORG_ID/VERCEL_PROJECT_ID when run outside the repo (the watchdog).
+[ -n "${VERCEL_PROJECT_ID:-}" ] || cd "$ROOT/frontend"
 vercel env rm API_PROXY_TARGET production --yes >/dev/null 2>&1 || true
 printf '%s' "$URL" | vercel env add API_PROXY_TARGET production >/dev/null
 # Rebuild the live production deployment from its Git commit with the new
