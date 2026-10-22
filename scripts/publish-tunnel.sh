@@ -29,4 +29,7 @@ curl -fsS -m 20 "$URL/health" >/dev/null || echo "warning: $URL/health is not an
 cd "$ROOT/frontend"
 vercel env rm API_PROXY_TARGET production --yes >/dev/null 2>&1 || true
 printf '%s' "$URL" | vercel env add API_PROXY_TARGET production >/dev/null
-vercel deploy --prod --yes
+# Rebuild the live production deployment from its Git commit with the new
+# value. The project's Root Directory is `frontend`, so a `vercel deploy` from
+# here would look for frontend/frontend.
+vercel redeploy "${VERCEL_PRODUCTION_URL:-https://sales-forecasting-mu.vercel.app}" --environment production
