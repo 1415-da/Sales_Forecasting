@@ -41,11 +41,22 @@ DEPLOYMENT_DECISIONS_TABLE = "deployment_decisions"
 
 
 class DatasetStatus(str, Enum):
-    """``validated`` means checked but not yet sealed; ``ready`` is immutable."""
+    """
+    An upload session's lifecycle; ``ready`` is the immutable version.
 
+    ``processing`` (job running) -> ``needs_mapping`` (adapter/mapping or a
+    confirmation is required) | ``invalid`` (data fails a rule) |
+    ``validated`` (passes; not sealed) -> ``ready``. ``failed`` is an
+    infrastructure or processing failure, never a verdict on the data, and can
+    be retried.
+    """
+
+    PROCESSING = "processing"
+    NEEDS_MAPPING = "needs_mapping"
     INVALID = "invalid"
     VALIDATED = "validated"
     READY = "ready"
+    FAILED = "failed"
 
 
 class DatasetMode(str, Enum):
@@ -135,6 +146,28 @@ class TrainingDataset(Base):
         JSON_TYPE, nullable=False, default=dict
     )
 
+    # -- ingestion (adapters, mapping, processing) -------------------------
+    #: Every uploaded file: name (display only), size, sha256, object key.
+    source_files: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSON_TYPE, nullable=True)
+    adapter_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    adapter_version: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    #: Confirmed mapping and policies; bumping ``mapping_version`` invalidates
+    #: any earlier validation.
+    ingestion_config: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON_TYPE, nullable=True)
+    mapping_version: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    detection: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON_TYPE, nullable=True)
+    source_namespace: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    target_type: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    source_grain: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    feature_options: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON_TYPE, nullable=True)
+    context_object_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    context_object_sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    acknowledged_warnings: Mapped[Optional[List[str]]] = mapped_column(JSON_TYPE, nullable=True)
+    upload_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    processing_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    processing_started_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP_TYPE, nullable=True)
+    processing_finished_at: Mapped[Optional[datetime]] = mapped_column(TIMESTAMP_TYPE, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP_TYPE, nullable=False, default=utcnow)
     created_by_id: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid, _user_fk(), nullable=True)
     created_by_email: Mapped[Optional[str]] = mapped_column(String(320), nullable=True)
@@ -142,6 +175,7 @@ class TrainingDataset(Base):
 
     __table_args__ = (
         UniqueConstraint("name", "version", name="uq_training_dataset_name_version"),
+        Index("uq_training_datasets_upload_key", "upload_key", unique=True),
     )
 
 

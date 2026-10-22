@@ -61,21 +61,21 @@ def test_a_clean_store_day_file_validates():
 def test_missing_required_columns_are_named():
     result = check(store_days().drop(columns=["sales"]))
     assert not result.is_valid
-    assert "missing_columns" in codes(result)
+    assert "MISSING_REQUIRED_COLUMN" in codes(result)
 
 
 def test_product_level_rows_are_refused_not_summed():
     frame = store_days()
     frame["product_id"] = "FOODS_1_001"
     result = check(frame)
-    assert "product_grain" in codes(result)
+    assert "SOURCE_GRAIN_UNSUPPORTED" in codes(result)
     assert not result.is_valid
 
 
 def test_an_unmapped_context_column_is_refused():
     frame = store_days()
     frame["promo_flag"] = 1
-    assert "unmapped_columns" in codes(check(frame))
+    assert "UNMAPPED_COLUMNS" in codes(check(frame))
 
 
 def test_dates_must_be_iso_calendar_days():
@@ -83,7 +83,7 @@ def test_dates_must_be_iso_calendar_days():
     frame.loc[3, "date"] = "03/04/2015"
     frame.loc[4, "date"] = "2015-02-30"
     result = check(frame)
-    issue = next(item for item in result.report["errors"] if item["code"] == "invalid_date")
+    issue = next(item for item in result.report["errors"] if item["code"] == "INVALID_DATE_VALUES")
     assert issue["count"] == 2
     assert issue["examples"][0]["row"] == 5  # header is line 1
 
@@ -92,29 +92,33 @@ def test_a_blank_target_is_an_error_not_a_zero():
     frame = store_days()
     frame["sales"] = frame["sales"].astype(object)
     frame.loc[10, "sales"] = ""
-    assert "null_target" in codes(check(frame))
+    assert "NULL_TARGET" in codes(check(frame))
 
 
 def test_negative_revenue_follows_the_returns_policy():
     frame = store_days()
     frame.loc[50, "sales"] = -5
-    assert "negative_sales" in codes(check(frame))
+    assert "NEGATIVE_TARGET" in codes(check(frame))
     allowing = contract.ValidationPolicy(negative_sales="allow")
     result = check(frame, policy=allowing)
     assert result.is_valid
-    assert "negative_sales" in codes(result, "warnings")
+    assert "NEGATIVE_TARGET" in codes(result, "warnings")
 
 
 def test_store_identifiers_are_checked_and_scoped():
     frame = store_days()
     frame.loc[0, "store_id"] = "../etc"
-    assert "invalid_store_id" in codes(check(frame))
+    assert "INVALID_STORE_ID" in codes(check(frame))
     scoped = contract.ValidationPolicy(allowed_stores=("CA_1",))
-    assert "store_out_of_scope" in codes(check(store_days(), policy=scoped))
+    assert "STORE_OUT_OF_SCOPE" in codes(check(store_days(), policy=scoped))
 
 
-def test_an_unsupported_currency_is_a_different_target():
-    assert "incompatible_currency" in codes(check(store_days(), currency="EUR"))
+def test_any_iso_currency_or_explicit_unknown_can_be_trained():
+    # Whether it matches the serving model is a deployment question, not a
+    # data-validity one.
+    assert check(store_days(), currency="EUR").is_valid
+    assert check(store_days(), currency="UNKNOWN").is_valid
+    assert "INVALID_CURRENCY" in codes(check(store_days(), currency="euro"))
 
 
 # -- grain -------------------------------------------------------------------
@@ -131,7 +135,7 @@ def test_identical_repeated_rows_are_collapsed_and_counted():
 def test_conflicting_store_days_are_rejected_with_examples():
     extra = store_days().head(3).assign(sales=1.0)
     result = check(pd.concat([store_days(), extra], ignore_index=True))
-    issue = next(item for item in result.report["errors"] if item["code"] == "conflicting_duplicates")
+    issue = next(item for item in result.report["errors"] if item["code"] == "CONFLICTING_RECORDS")
     assert issue["count"] == 3
     assert issue["examples"]
 
@@ -140,7 +144,7 @@ def test_a_gap_is_missing_dates_not_a_zero_sales_day():
     frame = store_days()
     gap = frame.drop(index=[20, 21])
     result = check(gap)
-    assert "missing_dates" in codes(result)
+    assert "MISSING_DATES" in codes(result)
     zeros = store_days()
     zeros.loc[[20, 21], "sales"] = 0
     result = check(zeros)
@@ -151,7 +155,7 @@ def test_a_gap_is_missing_dates_not_a_zero_sales_day():
 def test_history_minimums_come_from_the_feature_definitions():
     assert contract.feature_warmup_days() == 30  # max lag / window in ml_config.yaml
     result = check(store_days(days=50))
-    assert {"insufficient_history", "insufficient_dates"} <= codes(result)
+    assert {"INSUFFICIENT_HISTORY", "INSUFFICIENT_EVALUATION_WINDOW"} <= codes(result)
 
 
 def test_an_append_upload_defers_history_rules_to_the_combined_data():
@@ -185,7 +189,7 @@ def test_snap_for_an_unknown_state_is_left_out_not_invented():
     result = check(store_days(stores=("STORE-9", "STORE-10")))
     assert result.is_valid
     assert "snap_day" not in result.frame.columns
-    assert "snap_unavailable" in codes(result, "warnings")
+    assert "SNAP_NOT_APPLICABLE" in codes(result, "warnings")
 
 
 def test_a_partly_filled_context_column_is_refused():
@@ -193,7 +197,7 @@ def test_a_partly_filled_context_column_is_refused():
     frame["snap_day"] = 0
     frame["snap_day"] = frame["snap_day"].astype(object)
     frame.loc[5, "snap_day"] = "maybe"
-    assert "invalid_snap_day" in codes(check(frame))
+    assert "INVALID_CONTEXT_VALUE" in codes(check(frame))
 
 
 # -- files and hashing -------------------------------------------------------
@@ -269,7 +273,7 @@ def test_real_and_synthetic_records_are_never_blended():
     synthetic = dict(META, source_types=["synthetic"])
     result = contract.combine(base, META, base, synthetic, conflict_policy="reject")
     assert result.frame is None
-    assert any(item["code"] == "mixed_sources" for item in result.report["errors"])
+    assert any(item["code"] == "MIXED_SOURCE_TYPES" for item in result.report["errors"])
 
 
 def test_appending_a_different_store_domain_or_currency_is_refused():
@@ -278,4 +282,4 @@ def test_appending_a_different_store_domain_or_currency_is_refused():
     assert contract.combine(base, META, other, META, conflict_policy="reject").frame is None
     euro = dict(META, currency="EUR")
     result = contract.combine(base, META, base, euro, conflict_policy="reject")
-    assert any(item["code"] == "incompatible_currency" for item in result.report["errors"])
+    assert any(item["code"] == "APPEND_INCOMPATIBLE" and item["column"] == "currency" for item in result.report["errors"])

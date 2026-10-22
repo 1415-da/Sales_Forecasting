@@ -112,11 +112,22 @@ def run_startup_tasks() -> None:
         logger.info("Database bootstrap skipped by configuration.")
         return
     bootstrap_database()
+    recover_interrupted_uploads()
     if _disabled("SKIP_ADMIN_BOOTSTRAP"):
         logger.info("Admin bootstrap skipped by configuration.")
         return
     bootstrap_admin_user()
     bootstrap_service_accounts()
+
+
+def recover_interrupted_uploads() -> None:
+    """Training uploads left mid-processing by a restart become retryable failures."""
+    try:
+        from api.services.ingestion_jobs import recover_interrupted
+
+        recover_interrupted()
+    except Exception as exc:  # noqa: BLE001 - start-up must not fail on this
+        logger.warning("Could not recover interrupted training uploads: %s", exc)
 
 
 def _disabled(name: str) -> bool:

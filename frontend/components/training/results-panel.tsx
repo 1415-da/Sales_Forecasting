@@ -59,7 +59,7 @@ export function ResultsPanel({ run }: { run: TrainingRunDetail }) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">6. Results and approval</CardTitle>
+          <CardTitle className="text-base">7. Results and approval</CardTitle>
         </CardHeader>
         <CardContent>
           <p className="text-sm text-muted-foreground">
@@ -119,7 +119,7 @@ export function ResultsPanel({ run }: { run: TrainingRunDetail }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">6. Results and approval</CardTitle>
+        <CardTitle className="text-base">7. Results and approval</CardTitle>
         <CardDescription>
           Scored once on the untouched test window {evaluation.split?.test?.join(' to ') ?? ''} (
           {evaluation.test_rows?.toLocaleString() ?? '—'} store-days). Target {evaluation.compatibility?.target}, daily,{' '}

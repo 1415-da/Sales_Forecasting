@@ -5,6 +5,7 @@ import { useCallback, useMemo } from 'react';
 
 import { ErrorState } from '@/components/shared/error-state';
 import { KpiSkeleton } from '@/components/shared/loading-skeleton';
+import { MappingPanel } from '@/components/training/mapping-panel';
 import { ResultsPanel } from '@/components/training/results-panel';
 import { RunProgressPanel } from '@/components/training/run-progress-panel';
 import { TrainingConfigCard } from '@/components/training/training-config-card';
@@ -67,7 +68,15 @@ export function RetrainingWorkspace() {
           onUploaded={(item) => setParam({ dataset: item.id })}
         />
         {dataset.data ? (
-          <ValidationPanel dataset={dataset.data} onSealed={(item) => setParam({ dataset: item.id })} />
+          <div className="space-y-4">
+            {/* Remounted per status/mapping version: its form starts from the server's current result. */}
+            <MappingPanel
+              key={`${dataset.data.id}-${dataset.data.status}-${dataset.data.mapping_version}`}
+              dataset={dataset.data}
+              contract={contract.data}
+            />
+            <ValidationPanel dataset={dataset.data} onSealed={(item) => setParam({ dataset: item.id })} />
+          </div>
         ) : dataset.isError ? (
           <ErrorState error={dataset.error} onRetry={() => void dataset.refetch()} />
         ) : (

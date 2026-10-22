@@ -208,7 +208,7 @@ def test_configured_origin_is_allowed(make_client):
     assert response.headers["access-control-allow-origin"] == "http://localhost:3000"
 
 
-@pytest.mark.parametrize("method", ["GET", "POST", "PATCH"])
+@pytest.mark.parametrize("method", ["GET", "POST", "PUT", "PATCH"])
 def test_preflight_allows_the_headers_the_browser_sends(make_client, method):
     """
     An authenticated browser call carries ``Authorization`` and, for the user

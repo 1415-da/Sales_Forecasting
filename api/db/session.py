@@ -157,6 +157,30 @@ def get_session() -> Iterator[Session]:
 #: gets it here; each also has an Alembic revision for migrated deployments.
 ADDITIVE_COLUMNS = (
     ("scenario_baseline_forecasts", "model", "VARCHAR(32)"),
+    # Training-data ingestion (adapters, mapping, background processing).
+    ("training_datasets", "source_files", "JSONB"),
+    ("training_datasets", "adapter_id", "VARCHAR(64)"),
+    ("training_datasets", "adapter_version", "VARCHAR(16)"),
+    ("training_datasets", "ingestion_config", "JSONB"),
+    ("training_datasets", "mapping_version", "INTEGER"),
+    ("training_datasets", "detection", "JSONB"),
+    ("training_datasets", "source_namespace", "VARCHAR(64)"),
+    ("training_datasets", "target_type", "VARCHAR(16)"),
+    ("training_datasets", "source_grain", "VARCHAR(32)"),
+    ("training_datasets", "feature_options", "JSONB"),
+    ("training_datasets", "context_object_key", "VARCHAR(255)"),
+    ("training_datasets", "context_object_sha256", "VARCHAR(64)"),
+    ("training_datasets", "acknowledged_warnings", "JSONB"),
+    ("training_datasets", "upload_key", "VARCHAR(64)"),
+    ("training_datasets", "processing_error", "TEXT"),
+    ("training_datasets", "processing_started_at", "TIMESTAMP WITH TIME ZONE"),
+    ("training_datasets", "processing_finished_at", "TIMESTAMP WITH TIME ZONE"),
+)
+
+
+#: Indexes that accompany ``ADDITIVE_COLUMNS`` (same Alembic revisions).
+ADDITIVE_INDEXES = (
+    ("uq_training_datasets_upload_key", "training_datasets", "upload_key", True),
 )
 
 
@@ -175,6 +199,17 @@ def ensure_additive_columns() -> None:
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}"))
         logger.info("Added column %s.%s", table, column)
+    for name, table, column, unique in ADDITIVE_INDEXES:
+        if table not in tables:
+            continue
+        existing = {item["name"] for item in inspect(engine).get_indexes(table)}
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"CREATE {'UNIQUE ' if unique else ''}INDEX IF NOT EXISTS {name} ON {table} ({column})")
+            )
+        logger.info("Created index %s", name)
 
 
 def ensure_tables_once() -> None:

@@ -51,6 +51,10 @@ class MemoryStore:
     def get(self, key):
         return self.objects[key]
 
+    def download(self, key, path):
+        with open(path, "wb") as handle:
+            handle.write(self.objects[key])
+
 
 class FakeAirflow:
     def __init__(self):
@@ -186,21 +190,22 @@ def test_a_malformed_file_is_stored_as_invalid_with_an_actionable_report(client)
     body = response.json()
     assert body["status"] == "invalid"
     codes = {issue["code"] for issue in body["validation_report"]["errors"]}
-    assert {"null_target", "invalid_date"} <= codes
+    assert {"NULL_TARGET", "INVALID_DATE_VALUES"} <= codes
     sealed = client.post(f"/v1/training/datasets/{body['id']}/validate")
-    assert sealed.json()["status"] == "invalid"
+    assert sealed.status_code == 409  # an invalid session can never become a version
 
 
 def test_store_scope_is_enforced(client, monkeypatch):
     monkeypatch.setenv("TRAINING_ALLOWED_STORES", "CA_1")
     body = upload(client).json()
-    assert "store_out_of_scope" in {issue["code"] for issue in body["validation_report"]["errors"]}
+    assert "STORE_OUT_OF_SCOPE" in {issue["code"] for issue in body["validation_report"]["errors"]}
 
 
 def test_storage_keys_are_generated_not_taken_from_the_filename(client, store):
     upload(client, filename="../../etc/passwd.csv")
-    (key,) = store.objects
-    assert key.startswith("datasets/") and "passwd" not in key and ".." not in key
+    assert store.objects
+    for key in store.objects:
+        assert key.startswith("datasets/") and "passwd" not in key and ".." not in key
 
 
 # ---------------------------------------------------------------------------
@@ -295,14 +300,14 @@ def test_appending_synthetic_data_to_real_history_is_rejected(client):
         source_type="synthetic",
     ).json()
     assert response["status"] == "invalid"
-    assert "mixed_sources" in {issue["code"] for issue in response["validation_report"]["errors"]}
+    assert "MIXED_SOURCE_TYPES" in {issue["code"] for issue in response["validation_report"]["errors"]}
 
 
 def test_conflicting_appends_need_the_correction_policy(client):
     base = ready_dataset(client)
     conflicting = csv_bytes(start="2015-07-10", days=30, base=1.0)
     rejected = upload(client, content=conflicting, mode="append", base_dataset_id=base["id"]).json()
-    assert "conflicting_overlap" in {issue["code"] for issue in rejected["validation_report"]["errors"]}
+    assert "CONFLICTING_RECORDS" in {issue["code"] for issue in rejected["validation_report"]["errors"]}
     corrected = upload(
         client, content=conflicting, mode="append", base_dataset_id=base["id"], conflict_policy="prefer_new"
     ).json()
@@ -678,3 +683,181 @@ def test_a_409_from_airflow_is_a_duplicate_not_a_failure():
     settings = SimpleNamespace(airflow_api_url="http://a", airflow_username="u", airflow_password="p", airflow_timeout_seconds=1.0, airflow_public_url="")
     with pytest.raises(AirflowConflict):
         AirflowClient(settings, transport=transport).trigger("d", "r", {})
+
+
+# ---------------------------------------------------------------------------
+# Ingestion through the real upload endpoint
+# ---------------------------------------------------------------------------
+
+
+def rossmann_csv(stores=(1, 2), days=200, gap_store=None) -> bytes:
+    rows = []
+    for store in stores:
+        for day in pd.date_range("2015-01-01", periods=days):
+            if gap_store == store and pd.Timestamp("2015-03-01") <= day <= pd.Timestamp("2015-03-05"):
+                continue
+            open_ = 0 if day.dayofweek == 6 else 1
+            rows.append(
+                {"Store": store, "DayOfWeek": day.dayofweek + 1, "Date": day.strftime("%Y-%m-%d"),
+                 "Sales": (4000 + store + day.day) * open_, "Customers": 400 * open_, "Open": open_,
+                 "Promo": 0, "StateHoliday": "0", "SchoolHoliday": 0}
+            )
+    return pd.DataFrame(rows).to_csv(index=False).encode()
+
+
+def upload_files(client, files, headers=None, **form):
+    data = {"name": f"ds-{uuid.uuid4().hex[:8]}", "mode": "independent", "source_type": "real"}
+    data.update(form)
+    return client.post(
+        "/v1/training/datasets",
+        files=[("files", (name, io.BytesIO(content), "text/csv")) for name, content in files],
+        data=data,
+        headers=headers or {},
+    )
+
+
+def test_the_upload_endpoint_adapts_rossmann_before_validating(client, store):
+    response = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR")
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["status"] == "validated", body["validation_report"]["errors"]
+    assert body["adapter_id"] == "rossmann" and body["source_namespace"] == "rossmann"
+    assert body["stores"] == ["rossmann_1", "rossmann_2"]
+    report = body["validation_report"]
+    assert report["adapter_message"].startswith("Rossmann data was adapted")
+    assert report["rows_received"] == 400 and report["rows_valid"] == 400
+    # Normalized output and retained context are stored beside the untouched original.
+    keys = [key for key in store.objects if key.startswith(f"datasets/{body['id']}/")]
+    assert any("/source/" in key for key in keys)
+    assert any("/processed/" in key for key in keys)
+    assert any("/context/" in key for key in keys)
+    original = next(key for key in keys if "/source/" in key)
+    assert store.objects[original] == rossmann_csv()
+
+
+def test_multiple_related_files_are_one_session(client):
+    store_csv = b"Store,StoreType,Assortment,CompetitionDistance,Promo2\n1,a,a,100,0\n2,b,c,200,1\n"
+    body = upload_files(client, [("train.csv", rossmann_csv()), ("store.csv", store_csv)], currency="EUR").json()
+    assert body["status"] == "validated"
+    assert [item["name"] for item in body["source_files"]] == ["train.csv", "store.csv"]
+    join = body["validation_report"]["store_metadata"]
+    assert join["rows_before"] == join["rows_after"] == 400
+
+
+def test_a_missing_confirmation_is_asked_for_then_mapping_changes_invalidate(client):
+    first = upload_files(client, [("train.csv", rossmann_csv())]).json()
+    assert first["status"] == "needs_mapping"
+    assert first["validation_report"]["rows_valid"] is None
+    assert client.post(f"/v1/training/datasets/{first['id']}/validate").status_code == 409
+
+    configured = client.put(
+        f"/v1/training/datasets/{first['id']}/configuration",
+        json={"config": {"currency": "EUR"}, "expected_mapping_version": first["mapping_version"]},
+    ).json()
+    assert configured["status"] == "validated" and configured["mapping_version"] == 2
+
+    changed = client.put(
+        f"/v1/training/datasets/{first['id']}/configuration",
+        json={"config": {"currency": "UNKNOWN"}, "expected_mapping_version": 2},
+    ).json()
+    assert changed["mapping_version"] == 3
+    # Sealing what the user saw at version 2 is refused: it is stale.
+    stale = client.post(f"/v1/training/datasets/{first['id']}/validate", json={"expected_mapping_version": 2})
+    assert stale.status_code == 409
+    fresh = client.post(f"/v1/training/datasets/{first['id']}/validate", json={"expected_mapping_version": 3})
+    assert fresh.json()["status"] == "ready"
+    # A ready version cannot be re-mapped.
+    again = client.put(f"/v1/training/datasets/{first['id']}/configuration", json={"config": {"currency": "EUR"}})
+    assert again.status_code == 422
+
+
+def test_warnings_that_need_acknowledgment_block_sealing_until_acknowledged(client):
+    body = upload_files(
+        client, [("train.csv", rossmann_csv(stores=(1, 2, 3), gap_store=2))], currency="EUR",
+        config='{"missing_dates": "exclude_stores"}',
+    ).json()
+    assert body["status"] == "validated"
+    assert body["stores"] == ["rossmann_1", "rossmann_3"]
+    refused = client.post(f"/v1/training/datasets/{body['id']}/validate")
+    assert refused.status_code == 422
+    sealed = client.post(
+        f"/v1/training/datasets/{body['id']}/validate", json={"acknowledged_warnings": ["STORES_EXCLUDED"]}
+    ).json()
+    assert sealed["status"] == "ready"
+    assert sealed["acknowledged_warnings"] == ["STORES_EXCLUDED"]
+
+
+def test_large_uploads_are_processed_in_the_background(client, monkeypatch):
+    from api.services import ingestion_jobs
+
+    monkeypatch.setenv("TRAINING_INLINE_PROCESSING_BYTES", "0")
+    queued = []
+    monkeypatch.setattr(ingestion_jobs, "submit", lambda dataset_id, factory: queued.append((dataset_id, factory)))
+    response = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR")
+    assert response.status_code == 202
+    assert response.json()["status"] == "processing"
+    # The worker runs later, in its own session; the browser polls the row.
+    dataset_id, factory = queued[0]
+    ingestion_jobs.run(dataset_id, factory)
+    assert client.get(f"/v1/training/datasets/{response.json()['id']}").json()["status"] == "validated"
+
+
+def test_a_storage_outage_is_a_retryable_failure_not_invalid_data(client, store, monkeypatch):
+    original = store.download
+
+    def broken(key, path):
+        raise storage.StorageUnavailableError("minio down")
+
+    store.download = broken
+    body = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR").json()
+    assert body["status"] == "failed"
+    assert body["processing_error"].startswith("STORAGE_UNAVAILABLE")
+    assert body["validation_report"]["errors"][0]["code"] == "STORAGE_UNAVAILABLE"
+    store.download = original
+    retried = client.post(f"/v1/training/datasets/{body['id']}/retry").json()
+    assert retried["status"] == "validated"
+
+
+def test_jobs_interrupted_by_a_restart_become_retryable_failures(client):
+    from api.services.ingestion_jobs import INTERRUPTED_MESSAGE, recover_interrupted
+
+    body = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR").json()
+    with session_scope() as session:
+        from api.db.models.training import TrainingDataset
+
+        session.get(TrainingDataset, uuid.UUID(body["id"])).status = "processing"
+    assert recover_interrupted() >= 1
+    after = client.get(f"/v1/training/datasets/{body['id']}").json()
+    assert after["status"] == "failed" and after["processing_error"] == INTERRUPTED_MESSAGE
+
+
+def test_a_retried_upload_with_the_same_key_is_one_session(client, store):
+    first = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR", headers={"Idempotency-Key": "upload-key-0001"})
+    stored = len(store.objects)
+    second = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR", headers={"Idempotency-Key": "upload-key-0001"})
+    assert first.json()["id"] == second.json()["id"]
+    assert second.status_code == 200 and len(store.objects) == stored
+
+
+def test_per_file_and_file_count_limits_are_explained(client, store, monkeypatch):
+    monkeypatch.setenv("TRAINING_UPLOAD_MAX_FILE_BYTES", "1000")
+    too_big = upload_files(client, [("train.csv", rossmann_csv())], currency="EUR")
+    assert too_big.status_code == 413
+    assert "limit" in too_big.json()["error"]["message"] and "ZIP" in too_big.json()["error"]["message"]
+    monkeypatch.setenv("TRAINING_UPLOAD_MAX_FILE_BYTES", str(10 * 1024 * 1024))
+    monkeypatch.setenv("TRAINING_UPLOAD_MAX_FILES", "1")
+    too_many = upload_files(client, [("a.csv", b"x"), ("b.csv", b"y")], currency="EUR")
+    assert too_many.status_code == 413
+    assert store.objects == {}
+
+
+def test_a_needs_mapping_or_invalid_session_cannot_start_training(client):
+    pending = upload_files(client, [("train.csv", rossmann_csv())]).json()
+    assert start(client, pending["id"]).status_code == 409
+
+
+def test_the_contract_publishes_limits_and_adapters(client):
+    body = client.get("/v1/training/contract").json()
+    assert body["limits"]["max_upload_bytes"] >= 38 * 1024 * 1024
+    assert {item["id"] for item in body["adapters"]} == {"canonical_store_day", "rossmann", "mapped_tabular"}
+    assert body["serving_currencies"] == ["USD"]

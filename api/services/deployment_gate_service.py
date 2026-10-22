@@ -165,3 +165,43 @@ class DeploymentGate:
             if ok
             else "The serving path returned non-finite or missing values."
         )
+
+
+def dataset_deployment_compatibility(
+    forecasts: ForecastService,
+    allowed_currencies: List[str],
+    stores: List[str],
+    currency: str,
+) -> Dict[str, Any]:
+    """
+    Whether a model trained on this dataset could replace the current one.
+
+    Shown at validation time so nobody discovers it after training: a dataset
+    can be perfectly trainable and still describe a different business from
+    the serving model.
+    """
+    model = forecasts.settings.default_model
+    current = next((item for item in forecasts.registry.list_versions(model) if item.is_production), None)
+    reasons: List[str] = []
+    if currency not in allowed_currencies:
+        reasons.append(
+            f"Revenue is in {currency or 'an unconfirmed currency'}; the serving model forecasts "
+            f"{', '.join(allowed_currencies)}."
+        )
+    served: List[str] = []
+    if current is not None and current.run_id:
+        bundle = forecasts.artifacts.try_load_bundle(current.run_id, model)
+        served = list(bundle.supported_stores) if bundle else []
+        missing = sorted(set(served) - set(stores))
+        if missing:
+            reasons.append(
+                f"The current Production model ({model} v{current.version}) serves {len(served)} stores; "
+                f"{len(missing)} of them are not in this dataset (e.g. {', '.join(missing[:5])}). "
+                "Scoped deployment is not supported, so a model trained on it cannot replace the shared model."
+            )
+    return {
+        "compatible": not reasons,
+        "production_model": f"{model} v{current.version}" if current else None,
+        "reasons": reasons,
+        "note": "This does not block training; it would block deployment of the resulting candidate.",
+    }

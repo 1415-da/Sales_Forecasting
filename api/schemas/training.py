@@ -28,6 +28,9 @@ class TrainingContractResponse(BaseModel):
     source_types: List[str]
     conflict_policies: List[str]
     workflows: Dict[str, str]
+    limits: Dict[str, Any] = Field(default_factory=dict)
+    adapters: List[Dict[str, str]] = Field(default_factory=list)
+    serving_currencies: List[str] = Field(default_factory=list)
 
 
 class DatasetOut(BaseModel):
@@ -40,9 +43,21 @@ class DatasetOut(BaseModel):
     conflict_policy: Optional[str] = None
     schema_version: str
     target: str
-    currency: str
+    target_type: Optional[str] = None
+    #: The confirmed currency, ``UNKNOWN`` when explicitly unknown, or null
+    #: while not yet confirmed.
+    currency: Optional[str] = None
     frequency: str
     source_types: List[str]
+    source_namespace: Optional[str] = None
+    source_grain: Optional[str] = None
+    adapter_id: Optional[str] = None
+    adapter_version: Optional[str] = None
+    mapping_version: Optional[int] = None
+    source_files: List[Dict[str, Any]] = Field(default_factory=list)
+    processing_error: Optional[str] = None
+    processing_started_at: Optional[datetime] = None
+    processing_finished_at: Optional[datetime] = None
     original_filename: Optional[str] = None
     file_format: str
     raw_sha256: str
@@ -64,6 +79,25 @@ class DatasetOut(BaseModel):
 
 class DatasetDetail(DatasetOut):
     validation_report: Dict[str, Any] = Field(default_factory=dict)
+    ingestion_config: Dict[str, Any] = Field(default_factory=dict)
+    feature_options: Optional[Dict[str, Any]] = None
+    acknowledged_warnings: List[str] = Field(default_factory=list)
+
+
+class DatasetConfigureRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    #: Adapter choice, column mapping, confirmations and policies.
+    config: Dict[str, Any] = Field(default_factory=dict)
+    #: The mapping version the caller is looking at; a mismatch is refused.
+    expected_mapping_version: Optional[int] = None
+
+
+class DatasetSealRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_mapping_version: Optional[int] = None
+    acknowledged_warnings: List[str] = Field(default_factory=list)
 
 
 class DatasetListResponse(BaseModel):

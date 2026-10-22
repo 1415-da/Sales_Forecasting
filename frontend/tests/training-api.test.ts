@@ -9,8 +9,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { pollDelay, POLL_BASE_MS, POLL_MAX_MS } from '@/hooks/use-training';
-import { registryAction, startTrainingRun, uploadTrainingDataset } from '@/lib/api';
-import { runDetailSchema } from '@/lib/types/training';
+import {
+  configureTrainingDataset,
+  registryAction,
+  sealTrainingDataset,
+  startTrainingRun,
+  uploadTrainingDataset,
+} from '@/lib/api';
+import { datasetDetailSchema, runDetailSchema } from '@/lib/types/training';
 
 const DATASET = {
   id: 'a'.repeat(32),
@@ -59,26 +65,75 @@ function json(body: unknown, status = 200) {
 afterEach(() => vi.restoreAllMocks());
 
 describe('training client', () => {
-  it('uploads as multipart without forcing a JSON content type', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(DATASET, 201));
-    const file = new File(['date,store_id,sales\n'], 'sales.csv', { type: 'text/csv' });
-    await uploadTrainingDataset({
-      file,
-      name: 'Store sales',
-      mode: 'append',
-      currency: 'USD',
-      sourceType: 'real',
-      baseDatasetId: 'b'.repeat(32),
-      conflictPolicy: 'prefer_new',
+  it('uploads several files as multipart with progress and no forced content type', async () => {
+    const sent: { headers: Record<string, string>; body?: FormData; url?: string } = { headers: {} };
+    class FakeXhr {
+      status = 202;
+      responseText = JSON.stringify({ ...DATASET, status: 'processing' });
+      upload: { onprogress: ((event: { lengthComputable: boolean; loaded: number; total: number }) => void) | null } = { onprogress: null };
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      ontimeout: (() => void) | null = null;
+      withCredentials = false;
+      timeout = 0;
+      open(_method: string, url: string) {
+        sent.url = url;
+      }
+      setRequestHeader(name: string, value: string) {
+        sent.headers[name] = value;
+      }
+      send(body: FormData) {
+        sent.body = body;
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 50, total: 100 });
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal('XMLHttpRequest', FakeXhr);
+    const progress: number[] = [];
+    const train = new File(['Store,Date,Sales\n'], 'train.csv', { type: 'text/csv' });
+    const meta = new File(['Store,StoreType\n'], 'store.csv', { type: 'text/csv' });
+    const result = await uploadTrainingDataset(
+      {
+        files: [train, meta],
+        name: 'Rossmann',
+        mode: 'append',
+        sourceType: 'real',
+        baseDatasetId: 'b'.repeat(32),
+        conflictPolicy: 'prefer_new',
+        idempotencyKey: 'upload-key-1',
+      },
+      (value) => progress.push(value),
+    );
+    vi.unstubAllGlobals();
+    expect(result.status).toBe('processing');
+    expect(sent.url).toMatch(/\/v1\/training\/datasets$/);
+    expect(sent.body?.getAll('files')).toHaveLength(2);
+    expect(sent.body?.get('mode')).toBe('append');
+    expect(sent.body?.get('conflict_policy')).toBe('prefer_new');
+    // Currency was not chosen, so none is sent: the server asks for it.
+    expect(sent.body?.get('currency')).toBeNull();
+    expect(sent.headers['Content-Type']).toBeUndefined();
+    expect(sent.headers['Idempotency-Key']).toBe('upload-key-1');
+    expect(progress).toEqual([0.5]);
+  });
+
+  it('sends the reviewed mapping version and acknowledgments when sealing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json({ ...DATASET, status: 'ready' }));
+    await sealTrainingDataset('a'.repeat(32), { expectedMappingVersion: 3, acknowledgedWarnings: ['STORES_EXCLUDED'] });
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      expected_mapping_version: 3,
+      acknowledged_warnings: ['STORES_EXCLUDED'],
     });
+  });
+
+  it('re-configures with the expected mapping version so stale edits are refused', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(DATASET));
+    await configureTrainingDataset('a'.repeat(32), { currency: 'EUR' }, 2);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toMatch(/\/v1\/training\/datasets$/);
-    expect(init.body).toBeInstanceOf(FormData);
-    const form = init.body as FormData;
-    expect(form.get('mode')).toBe('append');
-    expect(form.get('base_dataset_id')).toBe('b'.repeat(32));
-    expect(form.get('conflict_policy')).toBe('prefer_new');
-    expect((init.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+    expect(url).toMatch(/\/configuration$/);
+    expect(init.method).toBe('PUT');
+    expect(JSON.parse(init.body as string)).toEqual({ config: { currency: 'EUR' }, expected_mapping_version: 2 });
   });
 
   it('sends the idempotency key with a training request', async () => {
@@ -120,6 +175,19 @@ describe('training client', () => {
     const parsed = runDetailSchema.parse(RUN);
     expect(parsed.task_states).toEqual([]);
     expect(parsed.candidates).toEqual([]);
+  });
+});
+
+describe('dataset report parsing', () => {
+  it('keeps row counts null when row validation never ran', () => {
+    const parsed = datasetDetailSchema.parse({
+      ...DATASET,
+      status: 'invalid',
+      validation_report: { row_validation_performed: false, rows_valid: null, rows_invalid: null, errors: [], warnings: [] },
+    });
+    expect(parsed.validation_report.rows_valid).toBeNull();
+    expect(parsed.validation_report.rows_invalid).toBeNull();
+    expect(parsed.validation_report.row_validation_performed).toBe(false);
   });
 });
 

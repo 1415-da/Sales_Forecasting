@@ -162,7 +162,7 @@ export function generateRequestId(): string {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PATCH';
+  method?: 'GET' | 'POST' | 'PATCH' | 'PUT';
   body?: unknown;
   /** Multipart body (a file upload). Mutually exclusive with `body`. */
   formData?: FormData;
@@ -769,40 +769,129 @@ export function getTrainingDataset(
 }
 
 export interface DatasetUpload {
-  file: File;
+  files: File[];
   name: string;
   mode: 'independent' | 'append';
-  currency: string;
+  /** Unconfirmed until chosen; never defaulted. */
+  currency?: string;
   sourceType: string;
   baseDatasetId?: string;
   conflictPolicy?: string;
+  /** Extra confirmations (e.g. missing-date policy). */
+  config?: Record<string, unknown>;
+  idempotencyKey?: string;
 }
 
-/** Upload a CSV/Parquet file; the response carries the validation report. */
-export function uploadTrainingDataset(upload: DatasetUpload): Promise<TrainingDatasetDetail> {
+/**
+ * Upload one or more files (or a ZIP).
+ *
+ * XMLHttpRequest rather than fetch because only XHR reports upload progress.
+ * The server answers 201 when it processed inline, or 202 while a background
+ * job processes the files; either way the body is the dataset session.
+ */
+export function uploadTrainingDataset(
+  upload: DatasetUpload,
+  onProgress?: (fraction: number) => void,
+): Promise<TrainingDatasetDetail> {
   const form = new FormData();
-  form.append('file', upload.file);
+  for (const file of upload.files) form.append('files', file, file.name);
   form.append('name', upload.name);
   form.append('mode', upload.mode);
-  form.append('currency', upload.currency);
   form.append('source_type', upload.sourceType);
+  if (upload.currency) form.append('currency', upload.currency);
+  if (upload.config && Object.keys(upload.config).length > 0) form.append('config', JSON.stringify(upload.config));
   if (upload.mode === 'append' && upload.baseDatasetId) {
     form.append('base_dataset_id', upload.baseDatasetId);
     form.append('conflict_policy', upload.conflictPolicy ?? 'reject');
   }
-  return request('/v1/training/datasets', datasetDetailSchema, {
-    method: 'POST',
-    formData: form,
-    timeoutMs: UPLOAD_TIMEOUT_MS,
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const requestId = generateRequestId();
+    xhr.open('POST', `${apiBaseUrl()}/v1/training/datasets`);
+    xhr.withCredentials = true;
+    xhr.timeout = UPLOAD_TIMEOUT_MS;
+    const token = getAccessToken();
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    xhr.setRequestHeader('X-Request-ID', requestId);
+    if (upload.idempotencyKey) xhr.setRequestHeader('Idempotency-Key', upload.idempotencyKey);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable && onProgress) onProgress(event.loaded / event.total);
+    };
+    xhr.onerror = () =>
+      reject(new ApiError('The API could not be reached.', { kind: 'network', requestId }));
+    xhr.ontimeout = () =>
+      reject(new ApiError('The upload timed out.', { kind: 'timeout', requestId }));
+    xhr.onload = () => {
+      let payload: unknown;
+      try {
+        payload = JSON.parse(xhr.responseText);
+      } catch {
+        payload = undefined;
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const parsed = datasetDetailSchema.safeParse(payload);
+        if (parsed.success) resolve(parsed.data);
+        else reject(new ApiError('The API response did not match the expected shape.', { kind: 'schema', status: xhr.status }));
+        return;
+      }
+      const parsed = apiErrorSchema.safeParse(payload);
+      reject(
+        new ApiError(parsed.success ? parsed.data.error.message : `Upload failed with status ${xhr.status}.`, {
+          kind: 'http',
+          status: xhr.status,
+          ...(parsed.success
+            ? { code: parsed.data.error.code, field: parsed.data.error.field ?? null, details: parsed.data.error.details }
+            : {}),
+          requestId,
+        }),
+      );
+    };
+    xhr.send(form);
   });
 }
 
-/** Re-validate from storage and seal an immutable version. */
-export function sealTrainingDataset(datasetId: string): Promise<TrainingDatasetDetail> {
+/** Choose the adapter, confirm mapping and policies; re-validates. */
+export function configureTrainingDataset(
+  datasetId: string,
+  config: Record<string, unknown>,
+  expectedMappingVersion?: number | null,
+): Promise<TrainingDatasetDetail> {
+  return request(
+    `/v1/training/datasets/${encodeURIComponent(datasetId)}/configuration`,
+    datasetDetailSchema,
+    {
+      method: 'PUT',
+      body: { config, ...(expectedMappingVersion != null ? { expected_mapping_version: expectedMappingVersion } : {}) },
+      timeoutMs: UPLOAD_TIMEOUT_MS,
+    },
+  );
+}
+
+/** Re-run a processing job that failed for an infrastructure reason. */
+export function retryTrainingDataset(datasetId: string): Promise<TrainingDatasetDetail> {
+  return request(
+    `/v1/training/datasets/${encodeURIComponent(datasetId)}/retry`,
+    datasetDetailSchema,
+    { method: 'POST', timeoutMs: UPLOAD_TIMEOUT_MS },
+  );
+}
+
+/** Seal a validated session as an immutable version. */
+export function sealTrainingDataset(
+  datasetId: string,
+  options: { expectedMappingVersion?: number | null; acknowledgedWarnings?: string[] } = {},
+): Promise<TrainingDatasetDetail> {
   return request(
     `/v1/training/datasets/${encodeURIComponent(datasetId)}/validate`,
     datasetDetailSchema,
-    { method: 'POST', timeoutMs: UPLOAD_TIMEOUT_MS },
+    {
+      method: 'POST',
+      body: {
+        ...(options.expectedMappingVersion != null ? { expected_mapping_version: options.expectedMappingVersion } : {}),
+        acknowledged_warnings: options.acknowledgedWarnings ?? [],
+      },
+      timeoutMs: UPLOAD_TIMEOUT_MS,
+    },
   );
 }
 

@@ -110,6 +110,7 @@ def _test_features(conf: Dict[str, Any], split: Dict[str, Any]):
 
     manifest, frame = dataset_run.load_dataset(conf)
     trainer = ModelTrainer()
+    dataset_run.configure_feature_engineer(trainer.feature_engineer, manifest)
     _, _, test_df = trainer.prepare_data(
         dataset_run.training_frame(frame),
         target_col="sales",
@@ -167,6 +168,8 @@ def train(extract_result: Dict[str, Any], validation_summary: Dict[str, Any]) ->
 
     trainer = ModelTrainer()
     trainer.config["training"]["optuna_trials"] = config.optuna_trials
+    dataset_run.configure_feature_engineer(trainer.feature_engineer, manifest)
+    print(f"Feature policies: {dataset_run.feature_options(manifest).as_dict()}")
     train_df, val_df, test_df = trainer.prepare_data(
         daily,
         target_col="sales",
@@ -400,6 +403,9 @@ def summarize(
             "quality_gate": gate,
             "comparison": comparison,
             "compatibility": {
+                "source_namespace": manifest.get("source_namespace") or "canonical",
+                "target_type": manifest.get("target_type") or "revenue",
+                "adapter": (manifest.get("adapter") or {}).get("id") or "canonical_store_day",
                 "target": manifest["target"],
                 "frequency": manifest["frequency"],
                 "currency": manifest["currency"],

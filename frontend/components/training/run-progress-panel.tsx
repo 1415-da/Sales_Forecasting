@@ -67,7 +67,7 @@ export function RunProgressPanel({ run }: { run: TrainingRunDetail }) {
       <CardHeader>
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div>
-            <CardTitle className="text-base">4. Training progress</CardTitle>
+            <CardTitle className="text-base">6. Training progress</CardTitle>
             <CardDescription>
               {run.dataset_name} v{run.dataset_version} · {String(run.training_config.label ?? run.training_config_id)}
             </CardDescription>

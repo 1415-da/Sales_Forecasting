@@ -54,6 +54,18 @@ def processed_key(dataset_id: str, content_sha256: str) -> str:
     return f"datasets/{_check_id(dataset_id)}/processed/{_check_sha(content_sha256)}.parquet"
 
 
+def source_key(dataset_id: str, index: int, sha256: str, extension: str) -> str:
+    """An uploaded package member, by position and content; never its name."""
+    if extension not in ("csv", "parquet", "zip"):
+        raise ValueError("unsupported extension")
+    return f"datasets/{_check_id(dataset_id)}/source/{int(index):02d}-{_check_sha(sha256)}.{extension}"
+
+
+def context_key(dataset_id: str, sha256: str) -> str:
+    """Retained source context (not model input), stored beside the dataset."""
+    return f"datasets/{_check_id(dataset_id)}/context/{_check_sha(sha256)}.parquet"
+
+
 def report_key(dataset_id: str) -> str:
     return f"datasets/{_check_id(dataset_id)}/validation_report.json"
 
@@ -146,6 +158,29 @@ class DatasetStore:
             ContentType=content_type,
             Metadata={"sha256": sha256},
         )
+
+    def put_file_once(self, key: str, path: str, sha256: str, content_type: str) -> None:
+        """``put_once`` for a file on disk, streamed rather than read into memory."""
+        self.ensure_bucket()
+        existing = self._existing_sha(key)
+        if existing is not None:
+            if existing == sha256:
+                return
+            raise ImmutableObjectError(f"{key} already exists with different content")
+        with open(path, "rb") as handle:
+            self.client.upload_fileobj(
+                handle,
+                self.bucket,
+                key,
+                ExtraArgs={"ContentType": content_type, "Metadata": {"sha256": sha256}},
+            )
+
+    def download(self, key: str, path: str) -> None:
+        """Stream an object to a local file."""
+        try:
+            self.client.download_file(self.bucket, key, path)
+        except Exception as exc:  # noqa: BLE001
+            raise StorageUnavailableError(f"Could not read {key}: {exc}") from exc
 
     def get(self, key: str) -> bytes:
         try:

@@ -53,6 +53,7 @@ class AuditAction(str, Enum):
     # Training data
     DATASET_UPLOADED = "dataset.uploaded"
     DATASET_SEALED = "dataset.sealed"
+    DATASET_CONFIGURED = "dataset.configured"
 
     # Monitoring
     ALERT_ACKNOWLEDGED = "alert.acknowledged"
@@ -97,6 +98,7 @@ MODEL_SCOPED_ACTIONS = frozenset(
         AuditAction.DEPLOYMENT_BLOCKED,
         AuditAction.DATASET_UPLOADED,
         AuditAction.DATASET_SEALED,
+        AuditAction.DATASET_CONFIGURED,
         AuditAction.ALERT_ACKNOWLEDGED,
         AuditAction.ALERT_RESOLVED,
         AuditAction.MONITORING_EVALUATED,

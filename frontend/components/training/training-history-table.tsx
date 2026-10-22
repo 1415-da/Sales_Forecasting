@@ -26,7 +26,7 @@ export function TrainingHistoryTable({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">5. Training history</CardTitle>
+        <CardTitle className="text-base">8. Training history</CardTitle>
         <CardDescription>Select a request to see its progress and results.</CardDescription>
       </CardHeader>
       <CardContent>

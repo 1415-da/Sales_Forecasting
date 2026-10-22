@@ -26,6 +26,12 @@ from training.storage import DatasetStore, parse_uri
 #: is refused because serving would have to guess it.
 LEAKAGE_COLUMNS = ("quantity_sold", "profit")
 
+#: How closely reloaded predictions must reproduce training's, in sales units.
+#: The models predict in float32 and the trainer combines ensemble members in
+#: different arithmetic, so near-zero days (closures) differ by ~1e-3; a
+#: hundredth of a unit is far below any meaningful difference.
+REPRODUCTION_ATOL = 0.01
+
 CONF_KEYS = (
     "training_request_id",
     "dataset_id",
@@ -122,6 +128,7 @@ def revalidate(manifest: Dict[str, Any], frame: pd.DataFrame) -> Dict[str, Any]:
         policy_from_manifest(manifest),
         currency=manifest["currency"],
         source_type=(manifest.get("source_types") or ["real"])[0],
+        options=feature_options(manifest),
     )
     if not result.is_valid:
         codes = ", ".join(contract.iter_issue_codes(result.report))
@@ -136,6 +143,18 @@ def revalidate(manifest: Dict[str, Any], frame: pd.DataFrame) -> Dict[str, Any]:
         "split": report["split"],
         "warnings": [issue["code"] for issue in report["warnings"]],
     }
+
+
+def feature_options(manifest: Dict[str, Any]) -> contract.FeatureOptions:
+    """The feature policies the dataset was sealed with (defaults for v1 manifests)."""
+    return contract.FeatureOptions.from_dict(manifest.get("feature_options"))
+
+
+def configure_feature_engineer(engineer: Any, manifest: Dict[str, Any]) -> None:
+    """Drop the US holiday feature for sources it does not describe."""
+    if feature_options(manifest).holiday_calendar == "none":
+        date_features = list(engineer.feature_config.get("date_features") or [])
+        engineer.feature_config["date_features"] = [name for name in date_features if name != "is_holiday"]
 
 
 def training_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -168,6 +187,8 @@ def run_tags(manifest: Dict[str, Any], conf: Dict[str, Any]) -> Dict[str, str]:
     return {
         "training_request_id": conf["training_request_id"],
         "dataset_id": conf["dataset_id"],
+        "dataset_adapter": str((manifest.get("adapter") or {}).get("id") or "canonical_store_day"),
+        "source_namespace": str(manifest.get("source_namespace") or "canonical"),
         "dataset_name": str(manifest["name"]),
         "dataset_version": str(manifest["version"]),
         "dataset_content_sha256": manifest["processed"]["content_sha256"],
@@ -270,10 +291,10 @@ def quality_gate(
             finite = (
                 reloaded.shape == (test_rows,)
                 and bool(np.isfinite(reloaded).all())
-                and np.allclose(reloaded, expected, rtol=1e-6, atol=1e-6)
+                and np.allclose(reloaded, expected, rtol=1e-5, atol=REPRODUCTION_ATOL)
             )
             detail = (
-                f"{test_rows} finite predictions, identical to the training process."
+                f"{test_rows} finite predictions, matching the training process within {REPRODUCTION_ATOL} sales units."
                 if finite
                 else f"Shape {reloaded.shape} / finite={bool(np.isfinite(reloaded).all())} / "
                 "differs from in-memory predictions."

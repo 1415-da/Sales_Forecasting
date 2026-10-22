@@ -135,6 +135,22 @@ class ModelVisualizer:
         
         return fig
     
+    #: Points drawn in a scatter plot; beyond this a seeded sample is drawn.
+    MAX_SCATTER_POINTS = 20_000
+
+    @staticmethod
+    def _aligned(actual_data: pd.DataFrame, pred_df: pd.DataFrame, target_col: str) -> pd.DataFrame:
+        """
+        Actuals and predictions for the same test rows.
+
+        Aligned on the row index, which both frames share (the predictions are
+        built from the test frame). Joining on ``date`` alone was a
+        many-to-many join for multi-store data -- every store's prediction
+        matched every store's actual on that day -- which inflated the charts
+        and, for hundreds of stores, exhausted memory.
+        """
+        return actual_data[['date', target_col]].join(pred_df[['prediction']], how='inner')
+
     def create_residuals_analysis(self, predictions_dict: Dict[str, pd.DataFrame],
                                 actual_data: pd.DataFrame,
                                 target_col: str = 'sales',
@@ -146,12 +162,7 @@ class ModelVisualizer:
         merged_data = {}  # Keep track of merged dataframes
         for model_name, pred_df in predictions_dict.items():
             # Merge predictions with actual data
-            merged = pd.merge(
-                actual_data[['date', target_col]], 
-                pred_df[['date', 'prediction']], 
-                on='date',
-                how='inner'
-            )
+            merged = self._aligned(actual_data, pred_df, target_col)
             residuals_data[model_name] = merged[target_col] - merged['prediction']
             merged_data[model_name] = merged  # Store the merged dataframe
         
@@ -164,7 +175,10 @@ class ModelVisualizer:
         box_data = [residuals for residuals in residuals_data.values()]
         box_colors = [self.colors.get(model.lower(), '#95A5A6') for model in residuals_data.keys()]
         
-        bp = ax1.boxplot(box_data, labels=list(residuals_data.keys()), patch_artist=True)
+        # Matplotlib 3.9 renamed ``labels`` to ``tick_labels``.
+        import matplotlib
+        label_arg = 'tick_labels' if tuple(int(p) for p in matplotlib.__version__.split('.')[:2]) >= (3, 9) else 'labels'
+        bp = ax1.boxplot(box_data, patch_artist=True, **{label_arg: list(residuals_data.keys())})
         for patch, color in zip(bp['boxes'], box_colors):
             patch.set_facecolor(color)
             patch.set_alpha(0.7)
@@ -185,6 +199,9 @@ class ModelVisualizer:
         pred_values = first_pred['prediction'].values[:min_len]
         resid_values = first_residuals.values[:min_len]
         
+        if min_len > self.MAX_SCATTER_POINTS:
+            picked = np.random.default_rng(0).choice(min_len, self.MAX_SCATTER_POINTS, replace=False)
+            pred_values, resid_values = pred_values[picked], resid_values[picked]
         ax2.scatter(pred_values, resid_values,
                    color=self.colors.get(first_model.lower(), '#95A5A6'),
                    alpha=0.6, s=30)
@@ -230,6 +247,8 @@ class ModelVisualizer:
         from scipy import stats
         # Use the residuals array directly
         resid_array = first_residuals.values if hasattr(first_residuals, 'values') else first_residuals
+        if len(resid_array) > self.MAX_SCATTER_POINTS:
+            resid_array = np.random.default_rng(0).choice(resid_array, self.MAX_SCATTER_POINTS, replace=False)
         theoretical_quantiles = stats.probplot(resid_array, dist="norm", fit=False)[0]
         
         ax4.scatter(theoretical_quantiles, sorted(resid_array),
@@ -312,12 +331,7 @@ class ModelVisualizer:
         
         for model_name, pred_df in predictions_dict.items():
             # Merge and calculate errors
-            merged = pd.merge(
-                actual_data[['date', target_col]], 
-                pred_df[['date', 'prediction']], 
-                on='date',
-                how='inner'
-            )
+            merged = self._aligned(actual_data, pred_df, target_col)
             errors = (merged[target_col] - merged['prediction']).abs()
             
             # Create histogram

@@ -12,8 +12,14 @@ const nullableString = z.string().nullable().optional();
 export const issueSchema = z.object({
   code: z.string(),
   message: z.string(),
-  count: z.number().default(0),
+  severity: z.enum(['error', 'warning', 'info']).default('error'),
+  stage: z.string().nullable().optional(),
+  file: z.string().nullable().optional(),
+  column: z.string().nullable().optional(),
+  action: z.string().nullable().optional(),
+  count: z.number().nullable().default(0),
   examples: z.array(z.record(z.unknown())).default([]),
+  requires_ack: z.boolean().default(false),
 });
 export type ValidationIssue = z.infer<typeof issueSchema>;
 
@@ -30,9 +36,81 @@ export const storeReportSchema = z.object({
 });
 export type StoreReport = z.infer<typeof storeReportSchema>;
 
+export const stageNames = [
+  'file',
+  'detection',
+  'mapping',
+  'schema',
+  'rows',
+  'readiness',
+  'append',
+  'deployment',
+] as const;
+
+const confirmationSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  options: z.array(z.object({ value: z.string(), label: z.string() })).default([]),
+  required: z.boolean().default(true),
+  help: z.string().nullable().optional(),
+});
+export type Confirmation = z.infer<typeof confirmationSchema>;
+
+export const detectionCandidateSchema = z.object({
+  adapter_id: z.string(),
+  adapter_version: z.string(),
+  label: z.string(),
+  match: z.enum(['exact', 'partial', 'manual', 'none']),
+  evidence: z.array(z.string()).default([]),
+  files_used: z.array(z.record(z.string())).default([]),
+  files_excluded: z.array(z.record(z.string())).default([]),
+  missing_files: z.array(z.string()).default([]),
+  missing_fields: z.array(z.string()).default([]),
+  ambiguities: z.array(z.string()).default([]),
+  confirmations: z.array(confirmationSchema).default([]),
+  proposed_mapping: z.record(z.unknown()).default({}),
+  columns: z.record(z.array(z.string())).default({}),
+  usable: z.boolean().default(false),
+});
+export type DetectionCandidate = z.infer<typeof detectionCandidateSchema>;
+
+export const detectionSchema = z.object({
+  candidates: z.array(detectionCandidateSchema).default([]),
+  selected: z.string().nullable().optional(),
+  reason: z.string().default(''),
+  needs_input: z.array(z.string()).default([]),
+});
+export type Detection = z.infer<typeof detectionSchema>;
+
 export const validationReportSchema = z
   .object({
     status: z.string().optional(),
+    row_validation_performed: z.boolean().optional(),
+    rows_accepted: z.number().nullable().optional(),
+    stores_excluded: z.array(z.string()).default([]),
+    stages: z.record(z.object({ status: z.string(), issues: z.number().default(0) })).default({}),
+    detection: detectionSchema.nullable().optional(),
+    files: z
+      .object({
+        data: z.array(z.record(z.unknown())).default([]),
+        excluded: z.array(z.record(z.unknown())).default([]),
+      })
+      .nullable()
+      .optional(),
+    transformations: z.array(z.record(z.string())).nullable().optional(),
+    retained_columns: z.array(z.record(z.string())).nullable().optional(),
+    store_metadata: z.record(z.unknown()).nullable().optional(),
+    adapter_message: z.string().nullable().optional(),
+    deployment_compatibility: z
+      .object({
+        compatible: z.boolean(),
+        production_model: z.string().nullable().optional(),
+        reasons: z.array(z.string()).default([]),
+        note: z.string().nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+    mapping_version: z.number().nullable().optional(),
     rows_received: z.number().nullable().optional(),
     rows_valid: z.number().nullable().optional(),
     rows_invalid: z.number().nullable().optional(),
@@ -58,15 +136,25 @@ export const datasetSchema = z.object({
   id: z.string(),
   name: z.string(),
   version: z.number(),
-  status: z.enum(['invalid', 'validated', 'ready']),
+  status: z.enum(['processing', 'needs_mapping', 'invalid', 'validated', 'ready', 'failed']),
   mode: z.enum(['independent', 'append']),
   base_dataset_id: nullableString,
   conflict_policy: nullableString,
   schema_version: z.string(),
   target: z.string(),
-  currency: z.string(),
+  target_type: nullableString,
+  currency: nullableString,
   frequency: z.string(),
   source_types: z.array(z.string()),
+  source_namespace: nullableString,
+  source_grain: nullableString,
+  adapter_id: nullableString,
+  adapter_version: nullableString,
+  mapping_version: z.number().nullable().optional(),
+  source_files: z.array(z.record(z.unknown())).default([]),
+  processing_error: nullableString,
+  processing_started_at: nullableString,
+  processing_finished_at: nullableString,
   original_filename: nullableString,
   file_format: z.string(),
   raw_sha256: z.string(),
@@ -89,6 +177,9 @@ export type TrainingDataset = z.infer<typeof datasetSchema>;
 
 export const datasetDetailSchema = datasetSchema.extend({
   validation_report: validationReportSchema,
+  ingestion_config: z.record(z.unknown()).default({}),
+  feature_options: z.record(z.unknown()).nullable().optional(),
+  acknowledged_warnings: z.array(z.string()).default([]),
 });
 export type TrainingDatasetDetail = z.infer<typeof datasetDetailSchema>;
 
@@ -131,6 +222,23 @@ export const contractSchema = z.object({
   source_types: z.array(z.string()),
   conflict_policies: z.array(z.string()),
   workflows: z.record(z.string()),
+  limits: z
+    .object({
+      max_upload_bytes: z.number(),
+      max_file_bytes: z.number(),
+      max_files: z.number(),
+      max_expanded_bytes: z.number(),
+      max_compression_ratio: z.number(),
+      max_rows: z.number(),
+      processing_timeout_seconds: z.number(),
+      max_concurrent_jobs: z.number(),
+      preview_rows: z.number(),
+      inline_processing_bytes: z.number(),
+    })
+    .partial()
+    .default({}),
+  adapters: z.array(z.object({ id: z.string(), version: z.string(), label: z.string() })).default([]),
+  serving_currencies: z.array(z.string()).default([]),
 });
 export type TrainingContract = z.infer<typeof contractSchema>;
 
@@ -239,6 +347,9 @@ export const datasetHistorySchema = z.object({
   history: z.array(z.object({ date: z.string(), sales: z.number() })),
 });
 export type DatasetHistory = z.infer<typeof datasetHistorySchema>;
+
+/** Dataset statuses that are still changing on the server. */
+export const DATASET_BUSY_STATUSES: ReadonlySet<string> = new Set(['processing']);
 
 /** Statuses after which polling stops. */
 export const TERMINAL_STATUSES: ReadonlySet<TrainingStatus> = new Set(['succeeded', 'failed']);

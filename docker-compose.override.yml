@@ -324,8 +324,19 @@ services:
       # Uploaded training datasets: write-once objects in this MinIO bucket,
       # read by the Airflow workers through the same service name.
       - TRAINING_DATASET_BUCKET=${TRAINING_DATASET_BUCKET:-training-datasets}
-      - TRAINING_UPLOAD_MAX_BYTES=${TRAINING_UPLOAD_MAX_BYTES:-52428800}
-      - TRAINING_UPLOAD_MAX_ROWS=${TRAINING_UPLOAD_MAX_ROWS:-2000000}
+      # Upload limits (see include/data_ingestion/limits.py for the rationale).
+      # Whole request / any one file / files per upload / ZIP expansion.
+      - TRAINING_UPLOAD_MAX_BYTES=${TRAINING_UPLOAD_MAX_BYTES:-209715200}
+      - TRAINING_UPLOAD_MAX_FILE_BYTES=${TRAINING_UPLOAD_MAX_FILE_BYTES:-157286400}
+      - TRAINING_UPLOAD_MAX_FILES=${TRAINING_UPLOAD_MAX_FILES:-10}
+      - TRAINING_UPLOAD_MAX_EXPANDED_BYTES=${TRAINING_UPLOAD_MAX_EXPANDED_BYTES:-524288000}
+      - TRAINING_UPLOAD_MAX_COMPRESSION_RATIO=${TRAINING_UPLOAD_MAX_COMPRESSION_RATIO:-100}
+      - TRAINING_UPLOAD_MAX_ROWS=${TRAINING_UPLOAD_MAX_ROWS:-5000000}
+      # Background processing: time budget, parallel jobs, inline threshold.
+      - TRAINING_PROCESSING_TIMEOUT_SECONDS=${TRAINING_PROCESSING_TIMEOUT_SECONDS:-900}
+      - TRAINING_MAX_CONCURRENT_JOBS=${TRAINING_MAX_CONCURRENT_JOBS:-2}
+      - TRAINING_INLINE_PROCESSING_BYTES=${TRAINING_INLINE_PROCESSING_BYTES:-2097152}
+      - TRAINING_PREVIEW_ROWS=${TRAINING_PREVIEW_ROWS:-20}
       # reject | allow (net-of-returns revenue)
       - TRAINING_NEGATIVE_SALES_POLICY=${TRAINING_NEGATIVE_SALES_POLICY:-reject}
       # Comma-separated store scope for training uploads; empty = any valid id.

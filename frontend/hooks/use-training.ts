@@ -22,13 +22,18 @@ import {
   getTrainingDatasets,
   getTrainingRun,
   getTrainingRuns,
+  configureTrainingDataset,
   rejectCandidate,
+  retryTrainingDataset,
   sealTrainingDataset,
   startTrainingRun,
   uploadTrainingDataset,
   type DatasetUpload,
 } from '@/lib/api';
+import { useState } from 'react';
+
 import {
+  DATASET_BUSY_STATUSES,
   TERMINAL_STATUSES,
   type TrainingContract,
   type TrainingDataset,
@@ -80,6 +85,7 @@ export function useTrainingDatasets(enabled = true): UseQueryResult<TrainingData
   });
 }
 
+/** One dataset session; polled with backoff while the server is processing it. */
 export function useTrainingDataset(
   datasetId: string | null,
 ): UseQueryResult<TrainingDatasetDetail, Error> {
@@ -87,33 +93,52 @@ export function useTrainingDataset(
     queryKey: trainingKeys.dataset(datasetId ?? ''),
     queryFn: ({ signal }) => getTrainingDataset(datasetId as string, signal),
     enabled: Boolean(datasetId),
-    staleTime: 15_000,
+    staleTime: 5_000,
     retry,
+    refetchInterval: (query) =>
+      query.state.data && DATASET_BUSY_STATUSES.has(query.state.data.status)
+        ? pollDelay(Math.min(query.state.dataUpdateCount, 4))
+        : false,
   });
 }
 
-export function useUploadDataset() {
+function useDatasetMutation<TVariables>(mutationFn: (variables: TVariables) => Promise<TrainingDatasetDetail>) {
   const queryClient = useQueryClient();
-  return useMutation<TrainingDatasetDetail, Error, DatasetUpload>({
-    mutationFn: uploadTrainingDataset,
+  return useMutation<TrainingDatasetDetail, Error, TVariables>({
+    mutationFn,
     retry: false,
     onSuccess: (dataset) => {
       queryClient.setQueryData(trainingKeys.dataset(dataset.id), dataset);
       queryClient.invalidateQueries({ queryKey: trainingKeys.datasets });
     },
   });
+}
+
+/** Upload with measurable progress (0..1) while bytes are sent. */
+export function useUploadDataset() {
+  const [progress, setProgress] = useState<number | null>(null);
+  const mutation = useDatasetMutation<DatasetUpload>((upload) => {
+    setProgress(0);
+    return uploadTrainingDataset(upload, setProgress).finally(() => setProgress(null));
+  });
+  return { ...mutation, progress };
+}
+
+export function useConfigureDataset() {
+  return useDatasetMutation<{ datasetId: string; config: Record<string, unknown>; expectedMappingVersion?: number | null }>(
+    ({ datasetId, config, expectedMappingVersion }) =>
+      configureTrainingDataset(datasetId, config, expectedMappingVersion),
+  );
+}
+
+export function useRetryDataset() {
+  return useDatasetMutation<string>(retryTrainingDataset);
 }
 
 export function useSealDataset() {
-  const queryClient = useQueryClient();
-  return useMutation<TrainingDatasetDetail, Error, string>({
-    mutationFn: sealTrainingDataset,
-    retry: false,
-    onSuccess: (dataset) => {
-      queryClient.setQueryData(trainingKeys.dataset(dataset.id), dataset);
-      queryClient.invalidateQueries({ queryKey: trainingKeys.datasets });
-    },
-  });
+  return useDatasetMutation<{ datasetId: string; expectedMappingVersion?: number | null; acknowledgedWarnings?: string[] }>(
+    ({ datasetId, ...options }) => sealTrainingDataset(datasetId, options),
+  );
 }
 
 export function useTrainingRuns(enabled = true): UseQueryResult<TrainingRun[], Error> {

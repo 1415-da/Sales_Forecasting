@@ -62,7 +62,7 @@ export function TrainingConfigCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">3. Training configuration</CardTitle>
+        <CardTitle className="text-base">5. Start training</CardTitle>
         <CardDescription>
           Only sealed versions and approved configurations can be trained. Candidates are
           registered for review and never deployed automatically.

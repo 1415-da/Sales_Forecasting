@@ -184,6 +184,12 @@ def test_a_compatible_bundle_passes_every_check():
     assert gate()["passed"]
 
 
+def test_float32_rounding_near_zero_is_not_a_reproduction_failure():
+    # Closed days predict ~0; float32 vs float64 ensemble arithmetic differs by ~1e-3.
+    result = gate(predict=lambda: np.array([0.0008, 2.0, 3.0]), in_memory_predictions=[0.0, 2.0, 3.0])
+    assert result["passed"]
+
+
 @pytest.mark.parametrize(
     "overrides,check",
     [

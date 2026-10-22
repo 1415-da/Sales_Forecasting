@@ -128,7 +128,7 @@ def install_cors(app: FastAPI, settings: Settings) -> None:
         # PATCH is used by the admin user editor; Authorization carries the
         # bearer token on every /v1 call. Omitting either fails the browser's
         # preflight before the request is ever sent.
-        allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "OPTIONS"],
         allow_headers=[
             "Authorization",
             "Content-Type",
