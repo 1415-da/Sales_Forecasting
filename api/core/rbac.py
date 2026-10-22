@@ -62,6 +62,10 @@ class Permission(str, Enum):
     ROLLBACK_MODEL = "rollback_model"
     TRIGGER_RETRAINING = "trigger_retraining"
 
+    # Training data and retraining requests
+    MANAGE_TRAINING_DATA = "manage_training_data"
+    REQUEST_TRAINING = "request_training"
+
     # Monitoring
     VIEW_MONITORING = "view_monitoring"
     VIEW_MONITORING_DETAIL = "view_monitoring_detail"
@@ -92,10 +96,14 @@ _SELF_SERVICE: FrozenSet[Permission] = _READ_ONLY | {
     Permission.RUN_SCENARIO,
 }
 
-#: What an analyst adds: the detailed views, but still no mutations.
+#: What an analyst adds: the detailed views, plus uploading training data and
+#: starting approved training runs. Producing a candidate is not deploying one:
+#: promotion stays with the ML engineer.
 _ANALYST: FrozenSet[Permission] = _SELF_SERVICE | {
     Permission.VIEW_MODEL_REGISTRY_DETAIL,
     Permission.VIEW_MONITORING_DETAIL,
+    Permission.MANAGE_TRAINING_DATA,
+    Permission.REQUEST_TRAINING,
 }
 
 #: What an ML engineer adds: registry mutations, alerts, and audit visibility.

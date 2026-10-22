@@ -317,6 +317,28 @@ services:
       - MONITORING_SERVICE_NAME=${MONITORING_SERVICE_NAME:-Monitoring Service}
       # Where observed sales are read from, for the actuals ingestion step.
       - MONITORING_ACTUALS_PATH=${MONITORING_ACTUALS_PATH:-/usr/local/airflow/data/raw/kaggle_m5/v1.0.0/sales}
+      # The M5 outcomes end on 2016-04-24, so windows are anchored at the latest
+      # actual. Set to "today" for a live sales feed.
+      - MONITORING_REFERENCE_DATE=${MONITORING_REFERENCE_DATE:-latest_actual}
+      # --- Training workspace ---------------------------------------------
+      # Uploaded training datasets: write-once objects in this MinIO bucket,
+      # read by the Airflow workers through the same service name.
+      - TRAINING_DATASET_BUCKET=${TRAINING_DATASET_BUCKET:-training-datasets}
+      - TRAINING_UPLOAD_MAX_BYTES=${TRAINING_UPLOAD_MAX_BYTES:-52428800}
+      - TRAINING_UPLOAD_MAX_ROWS=${TRAINING_UPLOAD_MAX_ROWS:-2000000}
+      # reject | allow (net-of-returns revenue)
+      - TRAINING_NEGATIVE_SALES_POLICY=${TRAINING_NEGATIVE_SALES_POLICY:-reject}
+      # Comma-separated store scope for training uploads; empty = any valid id.
+      - TRAINING_ALLOWED_STORES=${TRAINING_ALLOWED_STORES:-}
+      - TRAINING_ALLOWED_CURRENCIES=${TRAINING_ALLOWED_CURRENCIES:-USD}
+      # Airflow 3 REST API, by service name inside the Astro network. The
+      # credentials stay in the API; the browser never calls Airflow.
+      - AIRFLOW_API_URL=${AIRFLOW_API_URL:-http://api-server:8080}
+      - AIRFLOW_API_USERNAME=${AIRFLOW_API_USERNAME:-admin}
+      - AIRFLOW_API_PASSWORD=${AIRFLOW_API_PASSWORD:-admin}
+      # Browser link to a run, shown to ML engineers and admins only.
+      - AIRFLOW_PUBLIC_URL=${AIRFLOW_PUBLIC_URL:-http://localhost:19382}
+      - TRAINING_DAG_ID=${TRAINING_DAG_ID:-sales_forecast_training}
       # Model resolution
       - MLFLOW_REGISTERED_MODEL_PREFIX=${MLFLOW_REGISTERED_MODEL_PREFIX:-sales_forecast_models_}
       - FORECAST_MODELS=${FORECAST_MODELS:-ensemble,xgboost,lightgbm}

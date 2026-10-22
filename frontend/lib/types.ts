@@ -231,4 +231,4 @@ export const CONFIDENCE_OPTIONS = [0.8, 0.95] as const;
 export type ConfidenceOption = (typeof CONFIDENCE_OPTIONS)[number];
 
 /** How history reaches the console. */
-export type HistorySource = 'sample' | 'upload' | 'manual';
+export type HistorySource = 'sample' | 'upload' | 'manual' | 'dataset';

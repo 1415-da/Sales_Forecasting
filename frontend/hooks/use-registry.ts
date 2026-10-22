@@ -95,6 +95,8 @@ export interface RegistryMutationInput {
   readonly model?: string;
   readonly reason?: string;
   readonly archiveExisting?: boolean;
+  /** `<model>:<version>`; required by the API for training candidates. */
+  readonly expectedIdentity?: string;
 }
 
 /**
@@ -116,6 +118,9 @@ export function useRegistryMutation() {
       queryClient.invalidateQueries({ queryKey: ['registry'] });
       queryClient.invalidateQueries({ queryKey: ['monitoring'] });
       queryClient.invalidateQueries({ queryKey: ['health'] });
+      queryClient.invalidateQueries({ queryKey: ['training'] });
+      // A new Production version can change which scenario levers exist.
+      queryClient.invalidateQueries({ queryKey: ['scenario'] });
     },
   });
 }

@@ -89,13 +89,13 @@ class MonitoringEvaluator:
 
     def run(self, request: EvaluateRequest) -> EvaluateResponse:
         """Execute the full pass and report it."""
-        today = request.reference_date or date.today()
-
         actuals = (
             ActualsLoadResult(skipped_reason="skipped by request")
             if request.skip_actuals
             else self.load_actuals(request.actuals_lookback_days)
         )
+        # Resolved after loading, so a data-anchored clock sees today's load.
+        today = self.monitoring.reference_date(request.reference_date)
 
         version, model_name, production = self._resolve_version(request.model_version)
 

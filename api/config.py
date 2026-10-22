@@ -119,6 +119,18 @@ class Settings:
     cors_allow_origins: Tuple[str, ...] = ()
     request_timeout_seconds: float = 120.0
 
+    # Airflow REST API, for dataset-driven training. Reached by Docker service
+    # name; the credentials stay in this process and are never returned.
+    airflow_api_url: str = "http://api-server:8080"
+    airflow_username: str = "admin"
+    airflow_password: str = ""
+    airflow_public_url: str = ""
+    airflow_timeout_seconds: float = 15.0
+    training_dag_id: str = "sales_forecast_training"
+    #: A run still unknown to Airflow this long after an uncertain submission
+    #: is submitted again under the same run id.
+    training_resubmit_after_seconds: int = 60
+
     # Repository root, used to put ``include/`` on the import path so the
     # pickled ensemble (``ml_models.ensemble_model``) can be unpickled.
     repo_root: str = ""
@@ -170,6 +182,13 @@ def load_settings() -> Settings:
             )
         ),
         repo_root=_env("REPO_ROOT", _default_repo_root()),
+        airflow_api_url=_env("AIRFLOW_API_URL", "http://api-server:8080").rstrip("/"),
+        airflow_username=_env("AIRFLOW_API_USERNAME", "admin"),
+        airflow_password=_env("AIRFLOW_API_PASSWORD", ""),
+        airflow_public_url=_env("AIRFLOW_PUBLIC_URL").rstrip("/"),
+        airflow_timeout_seconds=_env_float("AIRFLOW_API_TIMEOUT_SECONDS", 15.0),
+        training_dag_id=_env("TRAINING_DAG_ID", "sales_forecast_training"),
+        training_resubmit_after_seconds=_env_int("TRAINING_RESUBMIT_AFTER_SECONDS", 60),
     )
 
 

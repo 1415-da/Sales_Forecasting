@@ -1,7 +1,8 @@
 'use client';
 
 import { LineChart, ServerCrash } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useEffect, useMemo, useState } from 'react';
 
 import { RequireAuth } from '@/components/auth/require-auth';
 import { ExportButton } from '@/components/forecast/export-button';
@@ -21,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/hooks/use-auth';
 import { useForecast } from '@/hooks/use-forecast';
 import { useModels } from '@/hooks/use-models';
+import { friendlyMessage, getDatasetHistory } from '@/lib/api';
 import { NO_PERMISSION_MESSAGE, PERMISSIONS } from '@/lib/rbac';
 import { MIN_HISTORY_DAYS, validateHistory } from '@/lib/sample-history';
 import type { HistoryPoint, HistorySource } from '@/lib/types';
@@ -43,7 +45,9 @@ const INITIAL_CONTROLS: ForecastControlsValue = {
 export default function ForecastPage() {
   return (
     <RequireAuth permission={PERMISSIONS.viewForecast}>
-      <ForecastConsole />
+      <Suspense fallback={<KpiSkeleton />}>
+        <ForecastConsole />
+      </Suspense>
     </RequireAuth>
   );
 }
@@ -55,9 +59,42 @@ function ForecastConsole() {
   const models = useModels();
   const forecastRun = useForecast();
 
-  const [controls, setControls] = useState<ForecastControlsValue>(INITIAL_CONTROLS);
+  // A hand-off from Data & Retraining: ?model=&version=&store=&dataset=
+  const params = useSearchParams();
+  const handoff = useMemo(() => {
+    const model = params.get('model');
+    const version = params.get('version');
+    if (!model || !version) return null;
+    return { model, version, store: params.get('store') ?? '', dataset: params.get('dataset') };
+  }, [params]);
+
+  const [controls, setControls] = useState<ForecastControlsValue>(() =>
+    handoff
+      ? { ...INITIAL_CONTROLS, model: handoff.model, modelVersion: handoff.version, storeId: handoff.store }
+      : INITIAL_CONTROLS,
+  );
   const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [historySource, setHistorySource] = useState<HistorySource | null>(null);
+  const [datasetLabel, setDatasetLabel] = useState<string | null>(null);
+  const [datasetLoading, setDatasetLoading] = useState(false);
+  const [datasetError, setDatasetError] = useState<string | null>(null);
+
+  const loadDatasetHistory = async () => {
+    if (!handoff?.dataset || !controls.storeId) return;
+    setDatasetLoading(true);
+    setDatasetError(null);
+    try {
+      const result = await getDatasetHistory(handoff.dataset, controls.storeId, 90);
+      setHistory(result.history.map((point) => ({ date: point.date, sales: point.sales })));
+      setHistorySource('dataset');
+      setDatasetLabel(`${result.dataset_label}, ${result.store_id}`);
+      forecastRun.reset();
+    } catch (error) {
+      setDatasetError(error instanceof Error ? error.message : friendlyMessage(error));
+    } finally {
+      setDatasetLoading(false);
+    }
+  };
 
   // Default the selectors once the registry answers. Guarded on the current
   // value so a user's choice is never overwritten by a background refetch.
@@ -116,6 +153,42 @@ function ForecastConsole() {
           Generate a multi-day sales projection from the Production model.
         </p>
       </div>
+
+      {handoff ? (
+        <div className="space-y-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4 text-sm">
+          <p className="font-medium">
+            Approved model: {handoff.model} v{handoff.version}
+            {handoff.store ? ` · store ${controls.storeId || handoff.store}` : ''}
+          </p>
+          {handoff.dataset ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => void loadDatasetHistory()} disabled={datasetLoading || !controls.storeId}>
+                {datasetLoading ? 'Loading…' : `Load the last 90 recorded days of ${controls.storeId || 'the store'} from its training dataset`}
+              </Button>
+              <span className="text-xs text-muted-foreground">
+                Real recorded days, nothing generated. Or load your own history below.
+              </span>
+            </div>
+          ) : null}
+          {datasetLabel ? <p className="text-xs text-muted-foreground">History: {datasetLabel}</p> : null}
+          {datasetError ? <p role="alert" className="text-xs text-destructive">{datasetError}</p> : null}
+          {forecastRun.forecast ? (
+            forecastRun.forecast.model === handoff.model &&
+            forecastRun.forecast.model_version === handoff.version ? (
+              <p className="text-xs text-emerald-400">
+                Verified: this forecast was produced by {forecastRun.forecast.model} v
+                {forecastRun.forecast.model_version} ({forecastRun.forecast.model_stage}), run{' '}
+                {forecastRun.forecast.metadata.run_id ?? 'unknown'}.
+              </p>
+            ) : (
+              <p role="alert" className="text-xs text-destructive">
+                This forecast came from {forecastRun.forecast.model} v{forecastRun.forecast.model_version},
+                not the approved {handoff.model} v{handoff.version}.
+              </p>
+            )
+          ) : null}
+        </div>
+      ) : null}
 
       {models.isError ? (
         <ErrorState error={models.error} onRetry={() => void models.refetch()} />

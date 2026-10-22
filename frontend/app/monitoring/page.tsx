@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { Suspense, useState } from 'react';
 
 import { RequireAuth } from '@/components/auth/require-auth';
 import {
@@ -13,6 +14,8 @@ import { AccuracyTrendChart } from '@/components/monitoring/accuracy-trend-chart
 import { AlertsPanel } from '@/components/monitoring/alerts-panel';
 import { DriftTable } from '@/components/monitoring/drift-table';
 import { ErrorState } from '@/components/shared/error-state';
+import { RetrainingWorkspace } from '@/components/training/retraining-workspace';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { KpiSkeleton } from '@/components/shared/loading-skeleton';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
@@ -39,8 +42,54 @@ const WINDOW_OPTIONS = [7, 14, 28, 60, 90] as const;
 export default function MonitoringPage() {
   return (
     <RequireAuth permission={PERMISSIONS.viewMonitoring}>
-      <MonitoringDashboard />
+      {/* useSearchParams needs a Suspense boundary in the App Router. */}
+      <Suspense fallback={<KpiSkeleton count={2} />}>
+        <MonitoringTabs />
+      </Suspense>
     </RequireAuth>
+  );
+}
+
+/**
+ * Health for everyone; "Data & Retraining" for roles that can upload training
+ * data. The tab is in the URL so a refresh keeps it.
+ */
+function MonitoringTabs() {
+  const { can } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+  const params = useSearchParams();
+
+  if (!can(PERMISSIONS.manageTrainingData)) return <MonitoringDashboard />;
+
+  const tab = params.get('tab') === 'retraining' ? 'retraining' : 'health';
+  const setTab = (value: string) => {
+    const next = new URLSearchParams(params.toString());
+    if (value === 'retraining') next.set('tab', 'retraining');
+    else next.delete('tab');
+    router.replace(`${pathname}${next.size ? `?${next}` : ''}`, { scroll: false });
+  };
+
+  return (
+    <Tabs defaultValue="health" value={tab} onValueChange={setTab} className="space-y-4">
+      <TabsList aria-label="Monitoring sections">
+        <TabsTrigger value="health">Health</TabsTrigger>
+        <TabsTrigger value="retraining">Data &amp; Retraining</TabsTrigger>
+      </TabsList>
+      <TabsContent value="health">
+        <MonitoringDashboard />
+      </TabsContent>
+      <TabsContent value="retraining">
+        <div className="mb-4 space-y-1">
+          <h1 className="text-xl font-semibold tracking-tight">Data &amp; Retraining</h1>
+          <p className="text-sm text-muted-foreground">
+            Upload historical training data, create an immutable dataset version, train on it with
+            an approved configuration, and review the candidates before anything is deployed.
+          </p>
+        </div>
+        <RetrainingWorkspace />
+      </TabsContent>
+    </Tabs>
   );
 }
 

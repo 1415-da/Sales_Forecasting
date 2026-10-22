@@ -57,7 +57,9 @@ export function HistoryInput({
   onClear,
   validation,
 }: HistoryInputProps) {
-  const [mode, setMode] = useState<HistorySource>(source ?? 'sample');
+  const [mode, setMode] = useState<HistorySource>(
+    source && source !== 'dataset' ? source : 'sample',
+  );
   const [csvError, setCsvError] = useState<string | null>(null);
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -283,6 +285,9 @@ export function HistoryInput({
               <div className="flex items-center gap-2">
                 {source === 'sample' ? (
                   <StatusBadge tone="warning">Demo</StatusBadge>
+                ) : null}
+                {source === 'dataset' ? (
+                  <StatusBadge tone="success">Training dataset</StatusBadge>
                 ) : null}
                 <Button size="sm" variant="ghost" onClick={onClear}>
                   <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />

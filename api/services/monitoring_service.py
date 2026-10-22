@@ -65,6 +65,16 @@ STALE_DATA_WARNING_DAYS = 3
 STALE_DATA_CRITICAL_DAYS = 7
 ACCURACY_REGRESSION_WARNING = 0.25
 
+#: What "today" means for monitoring windows. ``today`` (the default) is the
+#: wall clock, right for a live point-of-sale feed. ``latest_actual`` anchors
+#: windows at the newest recorded actual, for a historical dataset replayed
+#: through the platform, whose outcomes all lie in the past; without it every
+#: window ends years after the last outcome and nothing is ever scorable. An
+#: ISO date pins the clock outright.
+REFERENCE_DATE_ENV = "MONITORING_REFERENCE_DATE"
+REFERENCE_TODAY = "today"
+REFERENCE_LATEST_ACTUAL = "latest_actual"
+
 
 @dataclass
 class WindowAccuracy:
@@ -154,11 +164,33 @@ class MonitoringService:
         self.actuals = ActualRepository(session)
         self.monitoring = MonitoringRepository(session)
 
+    # -- clock -------------------------------------------------------------
+
+    def reference_date(self, requested: Optional[date] = None) -> date:
+        """
+        The day monitoring windows end on.
+
+        An explicit date wins; otherwise ``MONITORING_REFERENCE_DATE`` decides.
+        ``latest_actual`` with no actuals yet falls back to the wall clock, so
+        an empty deployment reports no data rather than an invented window.
+        """
+        if requested is not None:
+            return requested
+        mode = os.getenv(REFERENCE_DATE_ENV, REFERENCE_TODAY).strip().lower()
+        if mode == REFERENCE_LATEST_ACTUAL:
+            return self.actuals.latest_date() or utcnow().date()
+        if mode and mode != REFERENCE_TODAY:
+            try:
+                return date.fromisoformat(mode)
+            except ValueError:
+                logger.warning("Ignoring invalid %s=%r", REFERENCE_DATE_ENV, mode)
+        return utcnow().date()
+
     # -- freshness ---------------------------------------------------------
 
     def freshness(self, *, reference_date: Optional[date] = None) -> FreshnessReport:
         """How current the actuals and forecasts are."""
-        today = reference_date or utcnow().date()
+        today = self.reference_date(reference_date)
         latest_actual = self.actuals.latest_date()
         report = FreshnessReport(
             latest_actual_date=latest_actual,
@@ -190,7 +222,7 @@ class MonitoringService:
         reflects a change in the model rather than a change in how much data
         happened to be available.
         """
-        today = reference_date or utcnow().date()
+        today = self.reference_date(reference_date)
         span = max(1, window_days)
         window_end = today
         window_start = today - timedelta(days=span - 1)
@@ -820,6 +852,7 @@ def monitoring_window_days() -> int:
 
 __all__ = [
     "ACCURACY_REGRESSION_WARNING",
+    "REFERENCE_DATE_ENV",
     "DEFAULT_WINDOW_DAYS",
     "NO_DATA_MESSAGE",
     "STALE_DATA_CRITICAL_DAYS",

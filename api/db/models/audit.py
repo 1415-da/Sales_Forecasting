@@ -47,6 +47,12 @@ class AuditAction(str, Enum):
     MODEL_ARCHIVED = "model.archived"
     MODEL_ROLLED_BACK = "model.rolled_back"
     RETRAINING_REQUESTED = "model.retraining_requested"
+    CANDIDATE_REJECTED = "model.candidate_rejected"
+    DEPLOYMENT_BLOCKED = "model.deployment_blocked"
+
+    # Training data
+    DATASET_UPLOADED = "dataset.uploaded"
+    DATASET_SEALED = "dataset.sealed"
 
     # Monitoring
     ALERT_ACKNOWLEDGED = "alert.acknowledged"
@@ -74,6 +80,8 @@ class ResourceType(str, Enum):
     SCENARIO = "scenario"
     MODEL_VERSION = "model_version"
     ALERT = "alert"
+    TRAINING_DATASET = "training_dataset"
+    TRAINING_REQUEST = "training_request"
     SYSTEM = "system"
 
 
@@ -85,6 +93,10 @@ MODEL_SCOPED_ACTIONS = frozenset(
         AuditAction.MODEL_ARCHIVED,
         AuditAction.MODEL_ROLLED_BACK,
         AuditAction.RETRAINING_REQUESTED,
+        AuditAction.CANDIDATE_REJECTED,
+        AuditAction.DEPLOYMENT_BLOCKED,
+        AuditAction.DATASET_UPLOADED,
+        AuditAction.DATASET_SEALED,
         AuditAction.ALERT_ACKNOWLEDGED,
         AuditAction.ALERT_RESOLVED,
         AuditAction.MONITORING_EVALUATED,

@@ -352,6 +352,8 @@ coefficient is invented to make the number look useful.
 
 ## Monitoring
 
+Monitoring has two tabs. **Health** (everyone) is described below. **Data & Retraining** (Analyst and above) uploads store-day training data, seals it as an immutable dataset version, starts the training DAG on it, and puts the resulting candidates in front of an ML Engineer for approval. Nothing is promoted automatically. See [docs/TRAINING_WORKSPACE.md](docs/TRAINING_WORKSPACE.md).
+
 ```
 Airflow @daily ─ urllib only ─▶ POST /v1/monitoring/evaluate
                                   ingest actuals → join forecasts ↔ actuals
@@ -582,6 +584,7 @@ Honest list, in rough order of how much they matter:
 | **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** | Docker setup, services and ports, every environment variable, initial admin, migrations, security checklist, backup, troubleshooting |
 | **[docs/FORECAST_WORKFLOW.md](docs/FORECAST_WORKFLOW.md)** | the forecast path in depth, including the feature contract |
 | **[docs/SCENARIO_PLANNER.md](docs/SCENARIO_PLANNER.md)** | the scenario engine, overrides, and capability gating |
+| **[docs/TRAINING_WORKSPACE.md](docs/TRAINING_WORKSPACE.md)** | Data & Retraining: training schema, dataset versions, Airflow-triggered training, quality gates, deployment approval and rollback |
 
 Interactive API docs: <http://localhost:8010/docs>.
 

@@ -61,6 +61,22 @@ def get_registry_admin_service() -> RegistryAdminService:
     )
 
 
+@lru_cache(maxsize=1)
+def get_dataset_store():
+    """Write-once object store for training datasets (MinIO, by service name)."""
+    from training.storage import DatasetStore
+
+    return DatasetStore()
+
+
+@lru_cache(maxsize=1)
+def get_airflow_client():
+    """Server-side Airflow REST client; credentials never leave this process."""
+    from api.services.airflow_client import AirflowClient
+
+    return AirflowClient(get_settings())
+
+
 def get_app_settings() -> Settings:
     """Resolved settings, as a dependency."""
     return get_settings()
@@ -77,11 +93,15 @@ def reset_services() -> None:
     get_model_registry_service.cache_clear()
     get_forecast_service.cache_clear()
     get_registry_admin_service.cache_clear()
+    get_dataset_store.cache_clear()
+    get_airflow_client.cache_clear()
     get_settings.cache_clear()
 
 
 __all__ = [
+    "get_airflow_client",
     "get_app_settings",
+    "get_dataset_store",
     "get_artifact_service",
     "get_forecast_service",
     "get_model_registry_service",

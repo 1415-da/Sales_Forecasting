@@ -1,5 +1,20 @@
+"""
+Train sales forecasting models.
+
+Two kinds of run share this DAG:
+
+* **Scheduled / manual runs** (no conf) train on the configured provider (M5)
+  and promote to Production, exactly as before.
+* **Training-request runs** are started by the API for an uploaded dataset.
+  Their conf names an immutable dataset version; every task loads that exact
+  version from object storage, no synthetic or provider data is generated, the
+  split is by calendar date, and the candidates are registered for review --
+  never promoted. Promotion happens only when an ML engineer approves one.
+"""
+
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
+from airflow.sdk import get_current_context
 from airflow.providers.standard.operators.bash import BashOperator
 import pandas as pd
 import os
@@ -7,6 +22,14 @@ import sys
 
 # Add include path
 sys.path.append("/usr/local/airflow/include")
+
+
+def _dataset_conf():
+    """The training-request conf of this run, or None for a default run."""
+    from training.dataset_run import is_dataset_run
+
+    conf = (get_current_context()["dag_run"].conf or {})
+    return conf if is_dataset_run(conf) else None
 
 
 default_args = {
@@ -32,6 +55,12 @@ default_args = {
 def sales_forecast_training():
     @task()
     def extract_data_task():
+        conf = _dataset_conf()
+        if conf:
+            from training import dag_tasks
+
+            return dag_tasks.extract(conf)
+
         from include.data_providers.factory import get_data_provider
 
         provider = get_data_provider()
@@ -46,6 +75,7 @@ def sales_forecast_training():
         for data_type, paths in result.file_paths.items():
             print(f"  - {data_type}: {len(paths)} files")
         return {
+            "mode": "default",
             "data_output_dir": result.data_output_dir,
             "file_paths": result.file_paths,
             "total_files": result.total_files,
@@ -56,6 +86,11 @@ def sales_forecast_training():
     def validate_data_task(extract_result):
         import glob
         import os
+
+        if extract_result.get("mode") == "dataset":
+            from training import dag_tasks
+
+            return dag_tasks.validate(extract_result)
 
         file_paths = extract_result["file_paths"]
         total_rows = 0
@@ -123,6 +158,11 @@ def sales_forecast_training():
 
     @task()
     def train_models_task(extract_result, validation_summary):
+        if extract_result.get("mode") == "dataset":
+            from training import dag_tasks
+
+            return dag_tasks.train(extract_result, validation_summary)
+
         from include.data_providers.factory import load_data_config
 
         file_paths = extract_result["file_paths"]
@@ -278,6 +318,7 @@ def sales_forecast_training():
         if not current_run_id and mlflow.active_run():
             current_run_id = mlflow.active_run().info.run_id
         return {
+            "mode": "default",
             "training_results": serializable_results,
             "mlflow_run_id": current_run_id,
             "data_lineage": extract_result.get("lineage"),
@@ -309,10 +350,14 @@ def sales_forecast_training():
                 )
                 runs = mlflow_manager.client.search_runs(exp.experiment_id, max_results=1)
                 run_id = runs[0].info.run_id if runs else "unknown"
-        return {"best_model": best_model_name, "best_run_id": run_id}
+        return {
+            "best_model": best_model_name,
+            "best_run_id": run_id,
+            "mode": training_result.get("mode", "default"),
+        }
 
     @task()
-    def register_best_model_task(evaluation_result):
+    def register_best_model_task(evaluation_result, training_result):
         from include.utils.mlflow_utils import MLflowManager
 
         best_model = evaluation_result.get("best_model")
@@ -338,15 +383,29 @@ def sales_forecast_training():
             raise RuntimeError("No model could be registered; refusing to report success")
 
         print(f"Best model by holdout RMSE: {best_model}")
-        return {"versions": model_versions, "best_model": best_model}
+        if training_result.get("mode") == "dataset":
+            from training import dag_tasks
+
+            dag_tasks.tag_versions({"versions": model_versions}, training_result)
+        return {
+            "versions": model_versions,
+            "best_model": best_model,
+            "mode": training_result.get("mode", "default"),
+        }
 
     @task()
     def transition_to_production_task(registration_result):
         from include.utils.mlflow_utils import MLflowManager
 
-        mlflow_manager = MLflowManager()
         versions = registration_result.get("versions", registration_result)
         best_model = registration_result.get("best_model")
+        if registration_result.get("mode") == "dataset":
+            # Uploaded-data candidates wait for an ML engineer's approval; this
+            # DAG never promotes them.
+            print(f"Manual review policy: not promoting {versions}")
+            return {"promoted": {}, "best_model": best_model, "skipped": "manual_review"}
+
+        mlflow_manager = MLflowManager()
 
         promoted = {}
         for model_name, version in versions.items():
@@ -401,13 +460,46 @@ def sales_forecast_training():
         print(f"Models trained: {list(report['model_performance'].keys())}")
         return report
 
+    @task()
+    def quality_gate_task(training_result, registration_result):
+        if training_result.get("mode") != "dataset":
+            return {"skipped": "default run"}
+        from training import dag_tasks
+
+        results = dag_tasks.quality_gate(training_result, registration_result)
+        if not any(gate["passed"] for gate in results.values()):
+            # Recorded first, then failed: the run must not read as a usable
+            # candidate when every model failed its gate.
+            raise RuntimeError("No candidate passed the quality gate")
+        return results
+
+    @task()
+    def compare_with_production_task(training_result):
+        if training_result.get("mode") != "dataset":
+            return {"skipped": "default run"}
+        from training import dag_tasks
+
+        return dag_tasks.compare(training_result)
+
+    @task()
+    def summarize_training_request_task(training_result, registration_result, gate, comparison):
+        if training_result.get("mode") != "dataset":
+            return {"skipped": "default run"}
+        from training import dag_tasks
+
+        return dag_tasks.summarize(training_result, registration_result, gate, comparison)
+
     # Task dependencies using function calls
     extract_result = extract_data_task()
     validation_summary = validate_data_task(extract_result)
     training_result = train_models_task(extract_result, validation_summary)
     evaluation_result = evaluate_models_task(training_result)
-    model_versions = register_best_model_task(evaluation_result)
+    model_versions = register_best_model_task(evaluation_result, training_result)
     transition = transition_to_production_task(model_versions)
+    gate = quality_gate_task(training_result, model_versions)
+    comparison = compare_with_production_task(training_result)
+    model_versions >> comparison
+    summary = summarize_training_request_task(training_result, model_versions, gate, comparison)
     report = generate_performance_report_task(training_result, validation_summary)
     cleanup = BashOperator(
         task_id="cleanup",

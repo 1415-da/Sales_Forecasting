@@ -24,7 +24,7 @@ from api.db.models.audit import AuditAction, ResourceType
 from api.db.models.user import User
 from api.db.session import get_session
 from api.dependencies.auth import actor_for, require_permission
-from api.deps import get_forecast_service, get_registry_admin_service
+from api.deps import get_dataset_store, get_forecast_service, get_registry_admin_service
 from api.schemas.models import (
     ArtifactSummary,
     MetricDeltaRow,
@@ -36,7 +36,13 @@ from api.schemas.models import (
     RegistryActionRequest,
     RegistryActionResponse,
 )
+from api.core.errors import DeploymentBlockedError
+from api.db.models.training import DecisionKind
+from api.db.session import session_scope
 from api.services.audit_service import AuditService
+from api.services.deployment_gate_service import DeploymentGate
+from api.services.training_dataset_service import TrainingDatasetService
+from api.services.training_service import TrainingService
 from api.services.forecast_service import ForecastService
 from api.services.registry_admin_service import (
     RegistryAction,
@@ -322,6 +328,7 @@ def _mutate(
     session: Session,
     admin: RegistryAdminService,
     service: ForecastService,
+    dataset_store=None,
 ) -> RegistryActionResponse:
     """
     Shared body for every registry mutation.
@@ -337,6 +344,50 @@ def _mutate(
         )
 
     chosen = (payload.model or admin.settings.default_model).strip().lower()
+
+    # A version produced by a training request is deployed only through its
+    # gates: exact identity, a reason, compatibility, and a smoke forecast.
+    training = TrainingService(session) if action is RegistryAction.PROMOTE else None
+    candidate_row = None
+    if training is not None:
+        registered = next(
+            (item for item in service.registry.list_versions(chosen) if item.version == str(model_version)),
+            None,
+        )
+        if registered is not None:
+            candidate_row = training.find_candidate(chosen, model_version, registered.run_id)
+    gate_result = None
+    if candidate_row is not None:
+        identity = f"{chosen}:{model_version}"
+        if not payload.reason or len(payload.reason.strip()) < 5:
+            raise ScenarioValidationError(
+                "Approving a training candidate needs a reason (at least 5 characters).",
+                field="reason",
+            )
+        if (payload.expected_identity or "").strip() != identity:
+            raise ScenarioValidationError(
+                f'Confirm the exact candidate: send "expected_identity": "{identity}".',
+                field="expected_identity",
+            )
+        gate = DeploymentGate(service, TrainingDatasetService(session, store=dataset_store))
+        try:
+            gate_result = gate.require(candidate_row, chosen, model_version)
+        except DeploymentBlockedError as exc:
+            # Its own transaction: the request session rolls back with the error.
+            with session_scope() as audit_session:
+                AuditService(audit_session).record(
+                    action=AuditAction.DEPLOYMENT_BLOCKED,
+                    resource_type=ResourceType.MODEL_VERSION,
+                    resource_id=identity,
+                    actor=actor_for(user, request),
+                    outcome="failure",
+                    metadata={
+                        "training_request_id": str(candidate_row.id),
+                        "reason": payload.reason,
+                        "checks": exc.details.get("checks"),
+                    },
+                )
+            raise
 
     if action is RegistryAction.PROMOTE:
         result = admin.promote(
@@ -363,8 +414,21 @@ def _mutate(
             "archived_versions": result.archived_versions,
             "verified": result.verified,
             "reason": payload.reason,
+            "training_request_id": str(candidate_row.id) if candidate_row else None,
         },
     )
+
+    if candidate_row is not None and result.verified:
+        training.record_decision(
+            row=candidate_row,
+            user=user,
+            kind=DecisionKind.APPROVED,
+            model=chosen,
+            version=model_version,
+            reason=payload.reason.strip(),
+            checks=gate_result or {},
+            previous_production_version=(gate_result or {}).get("previous_production_version"),
+        )
 
     # The cached bundle for the previously serving version would otherwise keep
     # answering forecasts after the pointer moved.
@@ -427,6 +491,7 @@ def promote_model(
     session: Session = Depends(get_session),
     admin: RegistryAdminService = Depends(get_registry_admin_service),
     service: ForecastService = Depends(get_forecast_service),
+    dataset_store=Depends(get_dataset_store),
 ) -> RegistryActionResponse:
     """
     Make a version the one that serves forecasts.
@@ -448,6 +513,7 @@ def promote_model(
         session=session,
         admin=admin,
         service=service,
+        dataset_store=dataset_store,
     )
 
 

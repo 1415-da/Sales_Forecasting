@@ -32,6 +32,16 @@ from api.db.models.scenario import (
     ScenarioForecast,
     ScenarioForecastStatus,
 )
+from api.db.models.training import (
+    DatasetMode,
+    DatasetStatus,
+    DecisionKind,
+    DeploymentDecision,
+    DeploymentState,
+    TrainingDataset,
+    TrainingRequest,
+    TrainingStatus,
+)
 from api.db.models.user import RefreshToken, User
 
 # The scenario checkpoint table is declared in the service module that owns its
@@ -50,6 +60,11 @@ __all__ = [
     "AuditAction",
     "AuditLog",
     "Base",
+    "DatasetMode",
+    "DatasetStatus",
+    "DecisionKind",
+    "DeploymentDecision",
+    "DeploymentState",
     "DriftMetric",
     "DriftStatus",
     "ForecastPoint",
@@ -63,6 +78,9 @@ __all__ = [
     "ScenarioDailyForecast",
     "ScenarioForecast",
     "ScenarioForecastStatus",
+    "TrainingDataset",
+    "TrainingRequest",
+    "TrainingStatus",
     "User",
     "utcnow",
 ]

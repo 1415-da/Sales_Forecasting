@@ -69,6 +69,20 @@ import {
   type ModelDetail,
   type ModelList,
 } from '@/lib/types';
+import {
+  contractSchema,
+  datasetDetailSchema,
+  datasetHistorySchema,
+  datasetListSchema,
+  runDetailSchema,
+  runListSchema,
+  type DatasetHistory,
+  type TrainingContract,
+  type TrainingDataset,
+  type TrainingDatasetDetail,
+  type TrainingRun,
+  type TrainingRunDetail,
+} from '@/lib/types/training';
 
 /**
  * Generous because the call runs model inference across up to 90 recursive
@@ -150,6 +164,10 @@ export function generateRequestId(): string {
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH';
   body?: unknown;
+  /** Multipart body (a file upload). Mutually exclusive with `body`. */
+  formData?: FormData;
+  /** Extra request headers, e.g. `Idempotency-Key`. */
+  headers?: Record<string, string>;
   timeoutMs?: number;
   signal?: AbortSignal;
 }
@@ -200,6 +218,16 @@ export const ERROR_MESSAGES: Record<string, string> = {
   PREDICTION_FAILED: 'The model could not produce a forecast for this request.',
   DATABASE_UNAVAILABLE: 'A required service is unavailable right now.',
   INTERNAL_SCENARIO_ERROR: 'Something went wrong on the server.',
+  DATASET_NOT_FOUND: 'That training dataset no longer exists.',
+  DATASET_INVALID: 'The dataset did not pass validation. See the report for details.',
+  DATASET_NOT_READY: 'Seal the dataset version before training on it.',
+  UPLOAD_TOO_LARGE: 'The file is larger than the upload limit.',
+  STORAGE_UNAVAILABLE: 'Dataset storage is unavailable right now. Try again in a moment.',
+  TRAINING_REQUEST_NOT_FOUND: 'That training request no longer exists.',
+  ORCHESTRATOR_UNAVAILABLE: 'Airflow is not reachable right now. Try again in a moment.',
+  ORCHESTRATOR_REJECTED: 'Airflow refused to start the training run.',
+  DEPLOYMENT_BLOCKED: 'This candidate did not pass a deployment check.',
+  IDEMPOTENCY_KEY_CONFLICT: 'That submission key was already used for a different request.',
 };
 
 /** The sentence to show a user for a given failure. */
@@ -317,8 +345,14 @@ async function request<T>(
           'X-Request-ID': requestId,
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
           ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+          ...(options.headers ?? {}),
         },
-        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        // A FormData body sets its own multipart boundary header.
+        ...(options.formData !== undefined
+          ? { body: options.formData }
+          : body !== undefined
+            ? { body: JSON.stringify(body) }
+            : {}),
         // Always included: the refresh cookie must reach /auth/*, and sending
         // it elsewhere is harmless since it is scoped to that path.
         credentials: 'include',
@@ -679,7 +713,13 @@ export function getModelArtifacts(
 export function registryAction(
   action: 'promote' | 'archive' | 'rollback',
   version: string,
-  payload: { model?: string; reason?: string; archiveExisting?: boolean } = {},
+  payload: {
+    model?: string;
+    reason?: string;
+    archiveExisting?: boolean;
+    /** `<model>:<version>`, required when promoting a training candidate. */
+    expectedIdentity?: string;
+  } = {},
 ): Promise<RegistryActionResult> {
   return request(
     `/v1/models/${encodeURIComponent(version)}/${action}`,
@@ -693,8 +733,155 @@ export function registryAction(
         model: payload.model ?? null,
         reason: payload.reason ?? null,
         archive_existing: payload.archiveExisting ?? true,
+        ...(payload.expectedIdentity ? { expected_identity: payload.expectedIdentity } : {}),
       },
     },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Training workspace
+// ---------------------------------------------------------------------------
+
+/** Uploads can be large; parsing and validation run server-side. */
+export const UPLOAD_TIMEOUT_MS = 120_000;
+
+/** Accepted training schema, validation policy, and approved configurations. */
+export function getTrainingContract(signal?: AbortSignal): Promise<TrainingContract> {
+  return request('/v1/training/contract', contractSchema, signal ? { signal } : {});
+}
+
+export function getTrainingDatasets(signal?: AbortSignal): Promise<TrainingDataset[]> {
+  return request('/v1/training/datasets', datasetListSchema, signal ? { signal } : {}).then(
+    (body) => body.datasets,
+  );
+}
+
+export function getTrainingDataset(
+  datasetId: string,
+  signal?: AbortSignal,
+): Promise<TrainingDatasetDetail> {
+  return request(
+    `/v1/training/datasets/${encodeURIComponent(datasetId)}`,
+    datasetDetailSchema,
+    signal ? { signal } : {},
+  );
+}
+
+export interface DatasetUpload {
+  file: File;
+  name: string;
+  mode: 'independent' | 'append';
+  currency: string;
+  sourceType: string;
+  baseDatasetId?: string;
+  conflictPolicy?: string;
+}
+
+/** Upload a CSV/Parquet file; the response carries the validation report. */
+export function uploadTrainingDataset(upload: DatasetUpload): Promise<TrainingDatasetDetail> {
+  const form = new FormData();
+  form.append('file', upload.file);
+  form.append('name', upload.name);
+  form.append('mode', upload.mode);
+  form.append('currency', upload.currency);
+  form.append('source_type', upload.sourceType);
+  if (upload.mode === 'append' && upload.baseDatasetId) {
+    form.append('base_dataset_id', upload.baseDatasetId);
+    form.append('conflict_policy', upload.conflictPolicy ?? 'reject');
+  }
+  return request('/v1/training/datasets', datasetDetailSchema, {
+    method: 'POST',
+    formData: form,
+    timeoutMs: UPLOAD_TIMEOUT_MS,
+  });
+}
+
+/** Re-validate from storage and seal an immutable version. */
+export function sealTrainingDataset(datasetId: string): Promise<TrainingDatasetDetail> {
+  return request(
+    `/v1/training/datasets/${encodeURIComponent(datasetId)}/validate`,
+    datasetDetailSchema,
+    { method: 'POST', timeoutMs: UPLOAD_TIMEOUT_MS },
+  );
+}
+
+/** The validation report as a downloaded JSON file. */
+export async function downloadValidationReport(datasetId: string): Promise<void> {
+  const token = getAccessToken();
+  const response = await fetch(
+    `${apiBaseUrl()}/v1/training/datasets/${encodeURIComponent(datasetId)}/report`,
+    {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: 'include',
+    },
+  );
+  if (!response.ok) {
+    throw new ApiError('The report could not be downloaded.', {
+      kind: 'http',
+      status: response.status,
+    });
+  }
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'validation-report.json';
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Real recorded days of one store from a sealed dataset. */
+export function getDatasetHistory(
+  datasetId: string,
+  storeId: string,
+  days = 90,
+  signal?: AbortSignal,
+): Promise<DatasetHistory> {
+  const query = new URLSearchParams({ store_id: storeId, days: String(days) });
+  return request(
+    `/v1/training/datasets/${encodeURIComponent(datasetId)}/history?${query}`,
+    datasetHistorySchema,
+    signal ? { signal } : {},
+  );
+}
+
+/** Start training. The key makes a retry return the same request. */
+export function startTrainingRun(
+  payload: { datasetId: string; trainingConfigId: string },
+  idempotencyKey: string,
+): Promise<TrainingRunDetail> {
+  return request('/v1/training/runs', runDetailSchema, {
+    method: 'POST',
+    body: { dataset_id: payload.datasetId, training_config_id: payload.trainingConfigId },
+    headers: { 'Idempotency-Key': idempotencyKey },
+  });
+}
+
+export function getTrainingRuns(signal?: AbortSignal): Promise<TrainingRun[]> {
+  return request('/v1/training/runs', runListSchema, signal ? { signal } : {}).then(
+    (body) => body.runs,
+  );
+}
+
+/** One request, refreshed from Airflow by the server. */
+export function getTrainingRun(runId: string, signal?: AbortSignal): Promise<TrainingRunDetail> {
+  return request(
+    `/v1/training/runs/${encodeURIComponent(runId)}`,
+    runDetailSchema,
+    signal ? { signal } : {},
+  );
+}
+
+export function rejectCandidate(
+  runId: string,
+  payload: { model: string; version: string; reason: string },
+): Promise<TrainingRunDetail> {
+  return request(
+    `/v1/training/runs/${encodeURIComponent(runId)}/reject`,
+    runDetailSchema,
+    { method: 'POST', body: payload },
   );
 }
 

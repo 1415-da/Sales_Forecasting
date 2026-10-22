@@ -30,6 +30,7 @@ from api.routers import health as health_router
 from api.routers import models as models_router
 from api.routers import monitoring as monitoring_router
 from api.routers import scenario as scenario_router
+from api.routers import training as training_router
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ def install_cors(app: FastAPI, settings: Settings) -> None:
             "X-Request-ID",
             "Idempotency-Key",
         ],
-        expose_headers=["X-Request-ID"],
+        expose_headers=["X-Request-ID", "Content-Disposition"],
     )
     logger.info("CORS enabled for origins: %s", ", ".join(origins))
 
@@ -192,6 +193,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(forecast_router.router)
     app.include_router(scenario_router.router)
     app.include_router(monitoring_router.router)
+    app.include_router(training_router.router)
     app.include_router(admin_users_router.router)
     app.include_router(admin_audit_router.router)
 

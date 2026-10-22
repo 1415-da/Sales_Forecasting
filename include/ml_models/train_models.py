@@ -43,7 +43,16 @@ class ModelTrainer:
         
     def prepare_data(self, df: pd.DataFrame, target_col: str = 'sales',
                     date_col: str = 'date', group_cols: Optional[List[str]] = None,
-                    categorical_cols: Optional[List[str]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+                    categorical_cols: Optional[List[str]] = None,
+                    date_windows: Optional[Dict[str, Any]] = None) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Build features and split chronologically.
+
+        ``date_windows`` (``{"train": [start, end], "validation": [...],
+        "test": [...]}``) splits by calendar date, so every store's rows for a
+        given day land in the same set. Without it the original row-position
+        split is used, unchanged for the default training path.
+        """
         
         logger.info("Preparing data for training")
         
@@ -68,6 +77,21 @@ class ModelTrainer:
         
         # Split data chronologically for time series
         df_sorted = df_features.sort_values(date_col)
+
+        if date_windows:
+            dates = pd.to_datetime(df_sorted[date_col])
+
+            def in_window(name: str) -> pd.Series:
+                start, end = (pd.Timestamp(value) for value in date_windows[name])
+                return (dates >= start) & (dates <= end)
+
+            train_df = df_sorted[in_window('train')].dropna(subset=[target_col])
+            val_df = df_sorted[in_window('validation')].dropna(subset=[target_col])
+            test_df = df_sorted[in_window('test')].dropna(subset=[target_col])
+            logger.info(
+                f"Date split - Train: {len(train_df)}, Val: {len(val_df)}, Test: {len(test_df)}"
+            )
+            return train_df, val_df, test_df
         
         # Use more recent data for validation and testing for better performance
         # This ensures the model learns from patterns closer to what it will predict
@@ -340,14 +364,15 @@ class ModelTrainer:
     def train_all_models(self, train_df: pd.DataFrame, val_df: pd.DataFrame,
                         test_df: pd.DataFrame, target_col: str = 'sales',
                         use_optuna: bool = True,
-                        dataset_lineage: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
+                        dataset_lineage: Optional[Dict[str, Any]] = None,
+                        run_tags: Optional[Dict[str, str]] = None) -> Dict[str, Dict[str, Any]]:
         
         results = {}
         
         # Start MLflow run
         run_id = self.mlflow_manager.start_run(
             run_name=f"sales_forecast_training_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
-            tags={"model_type": "ensemble", "use_optuna": str(use_optuna)}
+            tags={"model_type": "ensemble", "use_optuna": str(use_optuna), **(run_tags or {})}
         )
         self.current_run_id = run_id
         

@@ -42,6 +42,8 @@ bcrypt==4.2.1
 PyJWT==2.10.1
 # `email-validator` backs pydantic's EmailStr, which the auth schemas use.
 email-validator==2.2.0
+# Multipart form parsing, for training-data uploads (FastAPI's UploadFile).
+python-multipart==0.0.20
 # Schema migrations. Alembic owns the schema in a real deployment; `create_all`
 # at start-up only covers a fresh local database.
 alembic==1.14.1

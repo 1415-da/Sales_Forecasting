@@ -45,6 +45,8 @@ export const PERMISSIONS = {
   manageUsers: 'manage_users',
   viewAuditLogs: 'view_audit_logs',
   viewAllAuditLogs: 'view_all_audit_logs',
+  manageTrainingData: 'manage_training_data',
+  requestTraining: 'request_training',
 } as const;
 
 export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -64,7 +66,7 @@ export const ROLE_DESCRIPTIONS: Record<Role, string> = {
   ML_ENGINEER:
     'Promote, archive, and roll back models; trigger retraining; manage alerts; view audit logs.',
   ANALYST:
-    'Generate forecasts, run scenarios, and read detailed model and monitoring data.',
+    'Generate forecasts, run scenarios, read detailed model and monitoring data, upload training data and start approved training runs.',
   BUSINESS_USER:
     'Generate forecasts, run scenarios, and read high-level model health.',
   VIEWER: 'Read-only access to forecasts, performance, and monitoring.',

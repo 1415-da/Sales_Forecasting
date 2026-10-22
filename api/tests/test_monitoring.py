@@ -24,6 +24,7 @@ from api.db.repositories.monitoring_repository import (
     ForecastRepository,
     MonitoringRepository,
 )
+from api.db.base import utcnow
 from api.db.session import session_scope
 from api.services.monitoring_metrics import (
     MIN_DRIFT_SAMPLE,
@@ -557,3 +558,53 @@ def test_a_fingerprint_ignores_the_measured_value():
 
     assert first == second
     assert first != other
+
+
+# ---------------------------------------------------------------------------
+# Reference date
+# ---------------------------------------------------------------------------
+
+
+class _FixedActuals:
+    """Stands in for ``ActualRepository`` with a known newest outcome."""
+
+    def __init__(self, latest):
+        self._latest = latest
+
+    def latest_date(self, *, store_id=None):
+        return self._latest
+
+
+def _clock_service(latest):
+    with session_scope() as session:
+        service = MonitoringService(session)
+    service.actuals = _FixedActuals(latest)
+    return service
+
+
+def test_a_historical_dataset_anchors_windows_at_its_last_outcome(monkeypatch):
+    """
+    Replayed data ends in the past.
+
+    Anchored at the wall clock, every window would end years after the last
+    outcome and the page would say "no data" forever.
+    """
+    monkeypatch.setenv("MONITORING_REFERENCE_DATE", "latest_actual")
+    service = _clock_service(date(2016, 4, 24))
+    assert service.reference_date() == date(2016, 4, 24)
+    assert service.reference_date(date(2016, 3, 1)) == date(2016, 3, 1)
+
+
+def test_a_data_clock_without_outcomes_falls_back_to_today(monkeypatch):
+    monkeypatch.setenv("MONITORING_REFERENCE_DATE", "latest_actual")
+    assert _clock_service(None).reference_date() == utcnow().date()
+
+
+def test_the_default_clock_is_today_and_a_date_pins_it(monkeypatch):
+    service = _clock_service(date(2016, 4, 24))
+    monkeypatch.delenv("MONITORING_REFERENCE_DATE", raising=False)
+    assert service.reference_date() == utcnow().date()
+    monkeypatch.setenv("MONITORING_REFERENCE_DATE", "2016-02-01")
+    assert service.reference_date() == date(2016, 2, 1)
+    monkeypatch.setenv("MONITORING_REFERENCE_DATE", "not-a-date")
+    assert service.reference_date() == utcnow().date()

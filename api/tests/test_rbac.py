@@ -51,6 +51,10 @@ SPEC = {
     # finer-grained capability rather than a weaker version of the same one.
     "view_model_registry_detail": {"ADMIN": 1, "ML_ENGINEER": 1, "ANALYST": 1, "BUSINESS_USER": 0, "VIEWER": 0},
     "view_monitoring_detail":     {"ADMIN": 1, "ML_ENGINEER": 1, "ANALYST": 1, "BUSINESS_USER": 0, "VIEWER": 0},
+    # Training workspace: analysts upload data and start approved runs;
+    # deploying the result stays with promote_model.
+    "manage_training_data":       {"ADMIN": 1, "ML_ENGINEER": 1, "ANALYST": 1, "BUSINESS_USER": 0, "VIEWER": 0},
+    "request_training":           {"ADMIN": 1, "ML_ENGINEER": 1, "ANALYST": 1, "BUSINESS_USER": 0, "VIEWER": 0},
 }
 
 

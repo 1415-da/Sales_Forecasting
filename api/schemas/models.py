@@ -162,6 +162,15 @@ class RegistryActionRequest(BaseModel):
             "version serves at a time."
         ),
     )
+    expected_identity: Optional[str] = Field(
+        default=None,
+        max_length=80,
+        description=(
+            "'<model>:<version>' of the version being deployed. Required, with a "
+            "reason, when the version is a candidate from a training request, so "
+            "an approval cannot land on a different version than the one reviewed."
+        ),
+    )
 
 
 class RegistryActionResponse(BaseModel):

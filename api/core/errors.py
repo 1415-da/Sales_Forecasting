@@ -80,6 +80,16 @@ class ScenarioErrorCode(str, Enum):
     MONITORING_DATA_UNAVAILABLE = "MONITORING_DATA_UNAVAILABLE"
     REGISTRY_OPERATION_FAILED = "REGISTRY_OPERATION_FAILED"
     INVALID_STATE_TRANSITION = "INVALID_STATE_TRANSITION"
+    # Training data and retraining.
+    DATASET_NOT_FOUND = "DATASET_NOT_FOUND"
+    DATASET_INVALID = "DATASET_INVALID"
+    DATASET_NOT_READY = "DATASET_NOT_READY"
+    UPLOAD_TOO_LARGE = "UPLOAD_TOO_LARGE"
+    STORAGE_UNAVAILABLE = "STORAGE_UNAVAILABLE"
+    TRAINING_REQUEST_NOT_FOUND = "TRAINING_REQUEST_NOT_FOUND"
+    ORCHESTRATOR_UNAVAILABLE = "ORCHESTRATOR_UNAVAILABLE"
+    ORCHESTRATOR_REJECTED = "ORCHESTRATOR_REJECTED"
+    DEPLOYMENT_BLOCKED = "DEPLOYMENT_BLOCKED"
 
 
 ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
@@ -120,6 +130,15 @@ ERROR_STATUS_MAP: Dict[ScenarioErrorCode, int] = {
     ScenarioErrorCode.MONITORING_DATA_UNAVAILABLE: 503,
     ScenarioErrorCode.REGISTRY_OPERATION_FAILED: 502,
     ScenarioErrorCode.INVALID_STATE_TRANSITION: 409,
+    ScenarioErrorCode.DATASET_NOT_FOUND: 404,
+    ScenarioErrorCode.DATASET_INVALID: 422,
+    ScenarioErrorCode.DATASET_NOT_READY: 409,
+    ScenarioErrorCode.UPLOAD_TOO_LARGE: 413,
+    ScenarioErrorCode.STORAGE_UNAVAILABLE: 503,
+    ScenarioErrorCode.TRAINING_REQUEST_NOT_FOUND: 404,
+    ScenarioErrorCode.ORCHESTRATOR_UNAVAILABLE: 503,
+    ScenarioErrorCode.ORCHESTRATOR_REJECTED: 502,
+    ScenarioErrorCode.DEPLOYMENT_BLOCKED: 409,
 }
 
 # Service-level codes predate this taxonomy. Mapping them here keeps the
@@ -571,6 +590,60 @@ class InvalidStateTransitionError(ScenarioPlannerError):
 
     code = ScenarioErrorCode.INVALID_STATE_TRANSITION
     default_message = "That change is not valid from the current state."
+
+
+class DatasetNotFoundError(ScenarioPlannerError):
+    """No such training dataset. -> 404"""
+
+    code = ScenarioErrorCode.DATASET_NOT_FOUND
+
+
+class DatasetInvalidError(ScenarioPlannerError):
+    """The dataset failed validation or combination. -> 422"""
+
+    code = ScenarioErrorCode.DATASET_INVALID
+
+
+class DatasetNotReadyError(ScenarioPlannerError):
+    """The dataset exists but is not a sealed, immutable version. -> 409"""
+
+    code = ScenarioErrorCode.DATASET_NOT_READY
+
+
+class UploadTooLargeError(ScenarioPlannerError):
+    """The upload exceeds the configured size limit. -> 413"""
+
+    code = ScenarioErrorCode.UPLOAD_TOO_LARGE
+
+
+class StorageUnavailableError(ScenarioPlannerError):
+    """The dataset object store could not be reached. -> 503"""
+
+    code = ScenarioErrorCode.STORAGE_UNAVAILABLE
+
+
+class TrainingRequestNotFoundError(ScenarioPlannerError):
+    """No such training request. -> 404"""
+
+    code = ScenarioErrorCode.TRAINING_REQUEST_NOT_FOUND
+
+
+class OrchestratorUnavailableError(ScenarioPlannerError):
+    """Airflow could not be reached, or did not answer in time. -> 503"""
+
+    code = ScenarioErrorCode.ORCHESTRATOR_UNAVAILABLE
+
+
+class OrchestratorRejectedError(ScenarioPlannerError):
+    """Airflow refused the request (auth, missing or paused DAG). -> 502"""
+
+    code = ScenarioErrorCode.ORCHESTRATOR_REJECTED
+
+
+class DeploymentBlockedError(ScenarioPlannerError):
+    """A candidate failed a deployment gate. -> 409"""
+
+    code = ScenarioErrorCode.DEPLOYMENT_BLOCKED
 
 
 class InternalScenarioError(ScenarioPlannerError):
