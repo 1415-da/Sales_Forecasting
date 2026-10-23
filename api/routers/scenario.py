@@ -286,6 +286,7 @@ def compare_scenario(
             "baseline_forecast_id": comparison.baseline_forecast_id,
         },
     )
+    _save_scenario(session, comparison, request)
     _attribute_scenario(session, comparison.scenario_id, user)
     return comparison
 
@@ -719,6 +720,28 @@ def _scenario_not_found(
 def _elapsed_ms(started: float) -> int:
     """Milliseconds since ``started``."""
     return int((time.perf_counter() - started) * 1000)
+
+
+def _save_scenario(
+    session: Session, comparison: ScenarioComparisonResponse, request: ScenarioRequest
+) -> None:
+    """
+    Save the comparison to ``scenario_forecasts`` and its days to
+    ``scenario_daily_forecasts``.
+
+    Best-effort, like attribution: the result is already stored in its
+    completed audit event, which is what ``GET /{scenario_id}`` serves, so a
+    failed save is logged rather than turning a finished comparison into an
+    error.
+    """
+    try:
+        from api.db.repositories.scenario_repository import ScenarioRepository
+
+        ScenarioRepository(engine=session.get_bind()).save_comparison(
+            comparison.model_dump(mode="json"), request.model_dump(mode="json")
+        )
+    except Exception as exc:  # noqa: BLE001 - persistence must not fail a result
+        logger.warning("Could not save scenario %s: %s", comparison.scenario_id, exc)
 
 
 def _attribute_scenario(session: Session, scenario_id: str, user: User) -> None:

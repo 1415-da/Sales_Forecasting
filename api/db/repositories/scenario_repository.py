@@ -137,14 +137,16 @@ class ScenarioRepository(BaseRepository):
         status: ScenarioForecastStatus = ScenarioForecastStatus.CREATED,
         response_summary: Optional[Dict[str, Any]] = None,
         expires_at: Optional[datetime] = None,
+        created_at: Optional[datetime] = None,
     ) -> ScenarioForecast:
         """
         Insert a scenario row.
 
         Written with status ``created`` before inference runs, so a crashed
         request leaves a diagnosable row rather than nothing at all.
+        ``created_at`` defaults to now; a backfill passes the original time.
         """
-        now = datetime.now(timezone.utc)
+        now = created_at or datetime.now(timezone.utc)
         if expires_at is None and self.ttl is not None:
             expires_at = now + self.ttl
 
@@ -301,6 +303,65 @@ class ScenarioRepository(BaseRepository):
         except SQLAlchemyError as exc:
             raise self._unavailable("expire scenarios", exc) from exc
 
+    def save_comparison(
+        self,
+        comparison: Dict[str, Any],
+        request_payload: Dict[str, Any],
+        *,
+        created_at: Optional[datetime] = None,
+    ) -> ScenarioForecast:
+        """
+        Persist a completed comparison and its daily rows.
+
+        ``comparison`` is a ``ScenarioComparisonResponse`` dumped to JSON.
+        Idempotent: an existing row for the scenario id is reused and its daily
+        rows are replaced, so a repeated save or backfill never duplicates.
+        """
+        scenario_id = comparison["scenario_id"]
+        daily = comparison.get("daily_forecasts") or []
+        row = self.get_scenario(scenario_id)
+        if row is None:
+            row = self.create_scenario(
+                scenario_id=scenario_id,
+                baseline_forecast_id=comparison.get("baseline_forecast_id"),
+                store_id=comparison.get("store_id") or request_payload["store_id"],
+                model_version=comparison["model_version"],
+                model_stage=comparison["model_stage"],
+                scenario_type=comparison["scenario_type"],
+                horizon_days=int(request_payload.get("horizon_days") or len(daily)),
+                forecast_type=comparison.get("forecast_type") or "predictive_what_if",
+                request_payload=request_payload,
+                status=ScenarioForecastStatus.COMPLETED,
+                response_summary=comparison,
+                created_at=created_at,
+            )
+        self.save_daily_forecasts(
+            scenario_id,
+            [
+                {
+                    "forecast_date": item["date"],
+                    # Point forecasts stand in for the median when the model
+                    # produced no quantiles.
+                    "baseline_p10": item.get("baseline_p10"),
+                    "baseline_p50": _first_present(
+                        item.get("baseline_p50"), item.get("baseline_forecast")
+                    ),
+                    "baseline_p90": item.get("baseline_p90"),
+                    "scenario_p10": item.get("scenario_p10"),
+                    "scenario_p50": _first_present(
+                        item.get("scenario_p50"), item.get("scenario_forecast")
+                    ),
+                    "scenario_p90": item.get("scenario_p90"),
+                    "difference_p50": _first_present(
+                        item.get("difference_p50"), item.get("daily_difference")
+                    ),
+                    "difference_pct_p50": item.get("daily_difference_pct"),
+                }
+                for item in daily
+            ],
+        )
+        return row
+
     # ------------------------------------------------------------------
     # Reads
     # ------------------------------------------------------------------
@@ -384,3 +445,8 @@ class ScenarioRepository(BaseRepository):
 def _as_float(value: Any) -> Optional[float]:
     """Coerce to float, preserving None."""
     return None if value is None else float(value)
+
+
+def _first_present(*values: Any) -> Any:
+    """The first value that is not None, or None."""
+    return next((value for value in values if value is not None), None)

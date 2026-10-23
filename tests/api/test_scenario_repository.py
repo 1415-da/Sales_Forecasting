@@ -403,6 +403,69 @@ def test_daily_forecast_dates_accept_strings_and_datetimes(repo):
     assert [row.forecast_date for row in stored] == [date(2026, 2, 1), date(2026, 2, 2)]
 
 
+def comparison_dump(daily: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """A ``ScenarioComparisonResponse`` as the router dumps it."""
+    return {
+        "scenario_id": SCENARIO_ID,
+        "baseline_forecast_id": BASELINE_ID,
+        "store_id": "store_001",
+        "model_version": "5",
+        "model_stage": "Production",
+        "scenario_type": "promotion",
+        "forecast_type": "predictive_what_if",
+        "daily_forecasts": daily
+        if daily is not None
+        else [
+            {
+                "date": "2026-02-01",
+                "baseline_forecast": 100.0,
+                "scenario_forecast": 110.0,
+                "daily_difference": 10.0,
+                "daily_difference_pct": 10.0,
+                "baseline_p10": 90.0,
+                "baseline_p90": 120.0,
+            },
+            {
+                "date": "2026-02-02",
+                "baseline_forecast": 200.0,
+                "scenario_forecast": 190.0,
+                "daily_difference": -10.0,
+                "daily_difference_pct": -5.0,
+                "baseline_p50": 205.0,
+                "difference_p50": -12.0,
+            },
+        ],
+    }
+
+
+def test_save_comparison_writes_the_scenario_and_its_days(repo):
+    created = datetime(2026, 1, 15, 9, 30, tzinfo=timezone.utc)
+
+    row = repo.save_comparison(comparison_dump(), REQUEST_PAYLOAD, created_at=created)
+
+    assert row.status == ScenarioForecastStatus.COMPLETED.value
+    assert row.horizon_days == HORIZON_DAYS
+    assert row.model_stage == "Production"
+    stored = repo.get_scenario(SCENARIO_ID)
+    assert stored.created_at.replace(tzinfo=timezone.utc) == created
+    assert stored.response_summary["baseline_forecast_id"] == BASELINE_ID
+
+    first, second = repo.get_daily_forecasts(SCENARIO_ID)
+    # Point forecasts fill the median only when no quantile was produced.
+    assert (first.baseline_p50, first.scenario_p50, first.difference_p50) == (100.0, 110.0, 10.0)
+    assert (first.baseline_p10, first.baseline_p90) == (90.0, 120.0)
+    assert (second.baseline_p50, second.difference_p50) == (205.0, -12.0)
+    assert second.difference_pct_p50 == -5.0
+
+
+def test_saving_a_comparison_twice_does_not_duplicate(repo):
+    repo.save_comparison(comparison_dump(), REQUEST_PAYLOAD)
+    repo.save_comparison(comparison_dump(), REQUEST_PAYLOAD)
+
+    assert len(repo.get_daily_forecasts(SCENARIO_ID)) == 2
+    assert len(repo.list_scenarios_by_store("store_001")) == 1
+
+
 def test_daily_forecasts_are_reachable_from_the_scenario(repo):
     repo.create_scenario(**scenario_kwargs())
     repo.save_daily_forecasts(SCENARIO_ID, daily_rows(3))
