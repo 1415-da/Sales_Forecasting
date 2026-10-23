@@ -27,9 +27,17 @@
 # fallback for a machine without the CLI, and it is what makes commands like
 # `docker compose config`, `ps`, and `logs` work here at all.
 #
-# Do not run this alongside `astro dev start`: the two are separate Compose
-# projects, but the override publishes 5001, 9000, 9001, and 8501 on fixed host
-# ports, so the second stack to start loses those bindings.
+# Project name
+# ------------
+# Pinned to the name the Astro CLI gives this checkout, so a plain
+# `docker compose up -d <service>` joins the running stack and its volumes.
+# Without it Compose names the project after the directory
+# (`sales_forecasting`) and starts a second, empty copy of every database it
+# touches -- which is how an Adminer added here once showed no rows.
+#
+# Do not run the whole stack with both `docker compose up` and
+# `astro dev start`: with one project name they manage the same containers.
+name: sales-forecasting_0655c3
 
 services:
   # --- Airflow metadata database --------------------------------------------

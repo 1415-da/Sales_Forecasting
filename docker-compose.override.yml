@@ -235,6 +235,24 @@ services:
       - default
     restart: unless-stopped
 
+  # Local-only browser UI for browsing the Scenario and MLflow PostgreSQL DBs.
+  # It is bound to loopback so it is not exposed to the LAN or public internet.
+  adminer:
+    image: adminer:4.8.1
+    platform: linux/arm64
+    ports:
+      - '127.0.0.1:8082:8080'
+    environment:
+      ADMINER_DEFAULT_SERVER: scenario-db
+    depends_on:
+      scenario-db:
+        condition: service_healthy
+      mlflow-db:
+        condition: service_healthy
+    networks:
+      - default
+    restart: unless-stopped
+
   # FastAPI serving layer: forecasts, model discovery, health, and metrics.
   #
   # Every model load and every prediction happens in this process. The browser

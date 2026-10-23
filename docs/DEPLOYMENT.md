@@ -177,6 +177,7 @@ astro dev kill     # removes containers AND volumes — destroys the database
 | `minio` console | 9001 | 9001 | MinIO web console |
 | `scenario-db` | 5432 | — | PostgreSQL: the application's 13 tables |
 | `mlflow-db` | 5432 | — | PostgreSQL: MLflow's backend store |
+| `adminer` | 8080 | 127.0.0.1:8082 | Local-only browser UI for PostgreSQL |
 | `redis` | 6379 | — | Airflow broker |
 | `minio-mc` | — | — | one-shot bucket provisioner |
 | `scheduler`, `dag-processor`, `triggerer` | — | — | Airflow components |
@@ -184,6 +185,20 @@ astro dev kill     # removes containers AND volumes — destroys the database
 The two databases are deliberately separate: scenario, user, audit, and
 monitoring tables are application state with their own lifecycle, and sharing
 MLflow's store would couple the two.
+
+To browse them, open <http://127.0.0.1:8082> (Adminer) and sign in with
+**System** PostgreSQL and either server below. If Adminer is not running, start
+it with `docker compose up -d --no-deps adminer`.
+
+| Server | Username / password / database | Contents |
+|---|---|---|
+| `scenario-db` | `scenario` / `scenario` / `scenario` | users, forecasts, actuals, monitoring, scenarios, audit log |
+| `mlflow-db` | `mlflow` / `mlflow` / `mlflow` | MLflow experiments, runs, registered models |
+
+`docker-compose.yml` pins the Compose project name to the Astro CLI's
+(`sales-forecasting_0655c3`). If a plain `docker compose up` shows empty
+tables, check `docker compose ls`: a second project means it ran without that
+name and created new, empty databases.
 
 ### OrbStack URLs
 
